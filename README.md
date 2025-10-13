@@ -101,11 +101,14 @@ Access at `http://localhost:8080` on Omarchy (opens automatically on login)
 
 Use these keyboard shortcuts on **Omarchy** while streaming:
 
-**Switch between monitors (Left/Middle/Right):**
-- `Ctrl + 1` - Focus **Left Monitor** (HDMI-A-2)
-- `Ctrl + 2` - Focus **Middle Monitor** (DP-2)
-- `Ctrl + 3` - Focus **Right Monitor** (DP-1)
-- `Ctrl + Left/Right Arrow` - Cycle through monitors
+**Move active window to specific monitor:**
+- `Ctrl + 1` - Move window to **Left Monitor** (HDMI-A-2)
+- `Ctrl + 2` - Move window to **Middle Monitor** (DP-2)
+- `Ctrl + 3` - Move window to **Right Monitor** (DP-1)
+- `Ctrl + Shift + Left/Right` - Move window to adjacent monitor
+
+**Focus monitor (cursor only):**
+- `Ctrl + Alt + 1/2/3` - Move cursor to Left/Middle/Right monitor
 
 **Switch between virtual desktops/workspaces:**
 - `Super + 1/2/3` - Switch to Desktop 1/2/3
@@ -113,9 +116,8 @@ Use these keyboard shortcuts on **Omarchy** while streaming:
 
 **Move windows between desktops:**
 - `Ctrl + Shift + 1/2/3` - Move window to Desktop 1/2/3 (and follow)
-- `Ctrl + Shift + Left/Right` - Move window to previous/next desktop (stay on current)
 
-These work exactly like Mac's Mission Control shortcuts!
+These work like Mac's window management!
 
 ### Raycast Commands (Mac)
 
