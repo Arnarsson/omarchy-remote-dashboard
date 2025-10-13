@@ -81,6 +81,23 @@ When streaming, Moonlight captures your mouse and keyboard. To switch Mac deskto
 - `Ctrl + Alt + Shift + S` - Show performance stats
 - `Ctrl + Alt + Shift + M` - Toggle mouse mode
 - `Ctrl + Alt + Shift + D` - Minimize stream window
+- `Ctrl + Alt + Shift + V` - Paste clipboard from Mac to Linux
+
+#### Clipboard Sync (Copy/Paste Between Mac and Linux)
+
+**Bidirectional clipboard is enabled!** Copy/paste works automatically:
+
+**Mac → Linux (Omarchy):**
+1. Copy text on your Mac (`Cmd + C`)
+2. While streaming, press `Ctrl + Alt + Shift + V` to paste on Omarchy
+3. Or just paste normally (`Ctrl + V`) if input is captured
+
+**Linux (Omarchy) → Mac:**
+1. Copy text on Omarchy (`Ctrl + C` in apps)
+2. Switch to Mac (release capture with `Ctrl + Alt + Shift + Z`)
+3. Paste on Mac (`Cmd + V`) - clipboard syncs automatically!
+
+The clipboard syncs in real-time during streaming via Sunshine's built-in clipboard support.
 
 ### Web Dashboard
 
