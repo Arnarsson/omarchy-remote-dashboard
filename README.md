@@ -143,11 +143,38 @@ All required ports are open:
 
 ## Troubleshooting
 
+### Error -1: Connection Terminated / Keeps Disconnecting
+
+**Problem**: Moonlight shows "Error -1" and keeps disconnecting randomly.
+
+**Root Cause**: Multiple active network interfaces (Ethernet + WiFi) cause packet routing conflicts.
+
+**Solution**: Disable WiFi and use only Ethernet
+```bash
+# Temporarily disable WiFi
+sudo ip link set wlan0 down
+
+# Or use the provided script
+~/remote-access-dashboard/disable-wifi.sh
+
+# Restart Sunshine after changing network
+systemctl --user restart sunshine
+```
+
+**Make it permanent**: Add to Hyprland autostart or create a systemd service.
+
+**Other potential causes:**
+- Network speed mismatch between host and client
+- VPN interfering with local network
+- Firewall blocking UDP ports 47998-48000
+- High packet loss or jitter on network
+
 ### Can't connect from Mac
 1. Check Tailscale is running on both machines: `tailscale status`
 2. Check Sunshine is running: `systemctl --user status sunshine`
 3. Check firewall: `sudo ufw status`
 4. Test API: `curl http://100.73.206.17:8080/api/ping`
+5. **Make sure WiFi is disabled** if you're using Ethernet
 
 ### Dashboard not opening on login
 1. Check autostart: `grep "Remote Access" ~/.config/hypr/autostart.conf`
