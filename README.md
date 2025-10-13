@@ -97,6 +97,24 @@ Access at `http://localhost:8080` on Omarchy (opens automatically on login)
 - `Ctrl+S`: Open Sunshine dashboard
 - `Ctrl+R`: Restart Sunshine
 
+### Omarchy Desktop Switching (Mac-like shortcuts)
+
+Use these keyboard shortcuts on **Omarchy** while streaming to switch between workspaces:
+
+**Direct workspace switching:**
+- `Ctrl + 1/2/3` - Switch to Desktop 1/2/3 (just like Mac!)
+- `Super + 1/2/3` - Alternative: Go to Desktop 1/2/3
+
+**Cycle through desktops:**
+- `Ctrl + Left/Right Arrow` - Previous/Next Desktop (just like Mac!)
+- `Super + Left/Right Arrow` - Alternative workspace navigation
+
+**Move windows between desktops:**
+- `Ctrl + Shift + 1/2/3` - Move window to Desktop 1/2/3 (and follow)
+- `Ctrl + Shift + Left/Right` - Move window to previous/next desktop (stay on current)
+
+These work exactly like Mac's Mission Control shortcuts!
+
 ### Raycast Commands (Mac)
 
 - `connect` - Quick connect to Omarchy
