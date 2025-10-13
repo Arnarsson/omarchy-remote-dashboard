@@ -97,17 +97,19 @@ Access at `http://localhost:8080` on Omarchy (opens automatically on login)
 - `Ctrl+S`: Open Sunshine dashboard
 - `Ctrl+R`: Restart Sunshine
 
-### Omarchy Desktop Switching (Mac-like shortcuts)
+### Omarchy Monitor & Desktop Switching (Mac-like shortcuts)
 
-Use these keyboard shortcuts on **Omarchy** while streaming to switch between workspaces:
+Use these keyboard shortcuts on **Omarchy** while streaming:
 
-**Direct workspace switching:**
-- `Ctrl + 1/2/3` - Switch to Desktop 1/2/3 (just like Mac!)
-- `Super + 1/2/3` - Alternative: Go to Desktop 1/2/3
+**Switch between monitors (Left/Middle/Right):**
+- `Ctrl + 1` - Focus **Left Monitor** (HDMI-A-2)
+- `Ctrl + 2` - Focus **Middle Monitor** (DP-2)
+- `Ctrl + 3` - Focus **Right Monitor** (DP-1)
+- `Ctrl + Left/Right Arrow` - Cycle through monitors
 
-**Cycle through desktops:**
-- `Ctrl + Left/Right Arrow` - Previous/Next Desktop (just like Mac!)
-- `Super + Left/Right Arrow` - Alternative workspace navigation
+**Switch between virtual desktops/workspaces:**
+- `Super + 1/2/3` - Switch to Desktop 1/2/3
+- `Super + Left/Right Arrow` - Previous/Next Desktop
 
 **Move windows between desktops:**
 - `Ctrl + Shift + 1/2/3` - Move window to Desktop 1/2/3 (and follow)
