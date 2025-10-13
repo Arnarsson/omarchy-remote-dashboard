@@ -64,6 +64,24 @@ If you're on a slow/unstable connection (like office wifi):
 
 The server is optimized for 10 Mbps with FEC (Forward Error Correction) for packet loss.
 
+#### Mouse Capture and Desktop Switching
+
+When streaming, Moonlight captures your mouse and keyboard. To switch Mac desktops or use Mac shortcuts:
+
+**Key Shortcut: `Ctrl + Alt + Shift + Z`** - Toggle mouse/keyboard capture on/off
+
+**How to switch Mac desktops while streaming:**
+1. Press `Ctrl + Alt + Shift + Z` to release mouse/keyboard
+2. Use `Ctrl + Left/Right Arrow` to switch Mac desktops (or swipe with 3 fingers on trackpad)
+3. Press `Ctrl + Alt + Shift + Z` again to recapture for streaming
+
+**Other useful Moonlight shortcuts:**
+- `Ctrl + Alt + Shift + Q` - Quit streaming session
+- `Ctrl + Alt + Shift + X` - Toggle fullscreen/windowed mode
+- `Ctrl + Alt + Shift + S` - Show performance stats
+- `Ctrl + Alt + Shift + M` - Toggle mouse mode
+- `Ctrl + Alt + Shift + D` - Minimize stream window
+
 ### Web Dashboard
 
 Access at `http://localhost:8080` on Omarchy (opens automatically on login)
