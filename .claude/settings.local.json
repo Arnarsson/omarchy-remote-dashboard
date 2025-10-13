@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//home/svenni/.config/sunshine/**)",
+      "Bash(xrandr:*)",
+      "Bash(hyprctl:*)",
+      "Bash(systemctl:*)",
+      "Read(//dev/dri/**)",
+      "Bash(echo $XDG_SESSION_TYPE)",
+      "Bash(./serve.sh:*)",
+      "Bash(git init:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

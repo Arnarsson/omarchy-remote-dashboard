@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Omarchy Remote Access Control</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            color: #fff;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .status-card {
+            background: rgba(255, 255, 255, 0.15);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .status-card h2 {
+            font-size: 1.5em;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: #4ade80;
+            box-shadow: 0 0 10px #4ade80;
+            animation: pulse 2s infinite;
+        }
+
+        .status-indicator.offline {
+            background: #ef4444;
+            box-shadow: 0 0 10px #ef4444;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .grid-2 {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .service-box {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            border-radius: 12px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .service-box h3 {
+            font-size: 1.2em;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .service-info {
+            margin-bottom: 15px;
+        }
+
+        .service-info .label {
+            font-size: 0.85em;
+            opacity: 0.8;
+            margin-bottom: 5px;
+        }
+
+        .service-info .value {
+            font-size: 1.1em;
+            font-weight: 600;
+            font-family: 'Courier New', monospace;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.25);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            padding: 12px 24px;
+            border-radius: 10px;
+            font-size: 1em;
+            cursor: pointer;
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            margin: 5px;
+        }
+
+        .btn:hover:not(:disabled) {
+            background: rgba(255, 255, 255, 0.35);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0,0,0,0.2);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-success {
+            background: rgba(74, 222, 128, 0.3);
+            border-color: rgba(74, 222, 128, 0.5);
+        }
+
+        .btn-success:hover:not(:disabled) {
+            background: rgba(74, 222, 128, 0.4);
+        }
+
+        .btn-danger {
+            background: rgba(239, 68, 68, 0.3);
+            border-color: rgba(239, 68, 68, 0.5);
+        }
+
+        .btn-danger:hover:not(:disabled) {
+            background: rgba(239, 68, 68, 0.4);
+        }
+
+        .btn-small {
+            padding: 8px 16px;
+            font-size: 0.9em;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+
+        .stat-box {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+
+        .stat-box .label {
+            font-size: 0.85em;
+            opacity: 0.8;
+            margin-bottom: 8px;
+        }
+
+        .stat-box .value {
+            font-size: 1.5em;
+            font-weight: 700;
+            font-family: 'Courier New', monospace;
+        }
+
+        .footer {
+            text-align: center;
+            margin-top: 20px;
+            padding-top: 20px;
+            opacity: 0.8;
+            font-size: 0.9em;
+        }
+
+        .loading {
+            opacity: 0.6;
+        }
+
+        .control-buttons {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-top: 15px;
+        }
+
+        .message {
+            padding: 12px;
+            border-radius: 8px;
+            margin: 10px 0;
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .message.success {
+            background: rgba(74, 222, 128, 0.3);
+        }
+
+        .message.error {
+            background: rgba(239, 68, 68, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🖥️ Omarchy Remote Access Control</h1>
+            <p>Real-time monitoring and control for remote desktop streaming</p>
+        </div>
+
+        <div class="status-card">
+            <h2>📊 System Stats</h2>
+            <div class="stats-grid">
+                <div class="stat-box">
+                    <div class="label">CPU Usage</div>
+                    <div class="value" id="cpu">--</div>
+                </div>
+                <div class="stat-box">
+                    <div class="label">Memory</div>
+                    <div class="value" id="memory">--</div>
+                </div>
+                <div class="stat-box">
+                    <div class="label">GPU Usage</div>
+                    <div class="value" id="gpu">--</div>
+                </div>
+                <div class="stat-box">
+                    <div class="label">GPU Temp</div>
+                    <div class="value" id="gpu-temp">--</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid-2">
+            <div class="status-card">
+                <h2>
+                    <span class="status-indicator" id="tailscale-indicator"></span>
+                    Tailscale VPN
+                </h2>
+                <div class="service-box">
+                    <div class="service-info">
+                        <div class="label">Tailscale IP</div>
+                        <div class="value" id="tailscale-ip">Loading...</div>
+                    </div>
+                    <div class="service-info">
+                        <div class="label">Mac Connected</div>
+                        <div class="value" id="mac-status">Checking...</div>
+                    </div>
+                    <div class="control-buttons">
+                        <a href="https://login.tailscale.com/admin/machines" target="_blank" class="btn btn-small">
+                            Open Admin
+                        </a>
+                    </div>
+                </div>
+            </div>
+
+            <div class="status-card">
+                <h2>
+                    <span class="status-indicator" id="sunshine-indicator"></span>
+                    Sunshine Streaming
+                </h2>
+                <div class="service-box">
+                    <div class="service-info">
+                        <div class="label">Service Status</div>
+                        <div class="value" id="sunshine-status">Loading...</div>
+                    </div>
+                    <div class="service-info">
+                        <div class="label">Web UI</div>
+                        <div class="value">https://localhost:47990</div>
+                    </div>
+                    <div id="sunshine-message"></div>
+                    <div class="control-buttons">
+                        <button class="btn btn-success btn-small" onclick="startSunshine()">▶️ Start</button>
+                        <button class="btn btn-danger btn-small" onclick="stopSunshine()">⏹️ Stop</button>
+                        <button class="btn btn-small" onclick="restartSunshine()">🔄 Restart</button>
+                        <a href="https://localhost:47990" target="_blank" class="btn btn-small">🔧 Dashboard</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="status-card">
+            <h2>🎮 Quick Connect Guide</h2>
+            <div class="service-box">
+                <h3>From your Mac:</h3>
+                <ol style="margin-left: 20px; line-height: 1.8;">
+                    <li>Make sure Tailscale is running on your Mac</li>
+                    <li>Open Moonlight app</li>
+                    <li>Add host: <strong><span id="connect-ip">100.73.206.17</span></strong>
+                        <button class="btn btn-small" onclick="copyIP()">📋 Copy</button>
+                    </li>
+                    <li>Enter pairing PIN if prompted</li>
+                    <li>Select streaming option and connect!</li>
+                </ol>
+                <div class="control-buttons">
+                    <a href="https://moonlight-stream.org" target="_blank" class="btn">Download Moonlight</a>
+                    <a href="https://tailscale.com/download" target="_blank" class="btn">Download Tailscale</a>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Last updated: <span id="lastUpdate">--</span></p>
+            <p>Auto-refresh every 5 seconds</p>
+        </div>
+    </div>
+
+    <script>
+        let updateInterval;
+
+        async function fetchStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                updateUI(data);
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
+            } catch (error) {
+                console.error('Failed to fetch status:', error);
+            }
+        }
+
+        function updateUI(data) {
+            // Tailscale
+            const tailscaleRunning = data.services.tailscale.running;
+            document.getElementById('tailscale-indicator').className =
+                'status-indicator ' + (tailscaleRunning ? '' : 'offline');
+            document.getElementById('tailscale-ip').textContent = data.services.tailscale.ip;
+            document.getElementById('connect-ip').textContent = data.services.tailscale.ip;
+            document.getElementById('mac-status').textContent =
+                data.services.tailscale.mac_connected ? '✅ Connected' : '❌ Offline';
+
+            // Sunshine
+            const sunshineRunning = data.services.sunshine.running;
+            document.getElementById('sunshine-indicator').className =
+                'status-indicator ' + (sunshineRunning ? '' : 'offline');
+            document.getElementById('sunshine-status').textContent =
+                sunshineRunning ? '✅ Running' : '❌ Stopped';
+
+            // System stats
+            document.getElementById('cpu').textContent = data.system.cpu;
+            document.getElementById('memory').textContent = data.system.memory;
+            document.getElementById('gpu').textContent = data.system.gpu;
+            document.getElementById('gpu-temp').textContent = data.system.gpu_temp;
+        }
+
+        async function startSunshine() {
+            showMessage('sunshine-message', 'Starting Sunshine...', 'info');
+            try {
+                const response = await fetch('/api/sunshine/start', { method: 'POST' });
+                const data = await response.json();
+                showMessage('sunshine-message', data.message, data.success ? 'success' : 'error');
+                setTimeout(fetchStatus, 2000);
+            } catch (error) {
+                showMessage('sunshine-message', 'Failed to start Sunshine', 'error');
+            }
+        }
+
+        async function stopSunshine() {
+            showMessage('sunshine-message', 'Stopping Sunshine...', 'info');
+            try {
+                const response = await fetch('/api/sunshine/stop', { method: 'POST' });
+                const data = await response.json();
+                showMessage('sunshine-message', data.message, data.success ? 'success' : 'error');
+                setTimeout(fetchStatus, 2000);
+            } catch (error) {
+                showMessage('sunshine-message', 'Failed to stop Sunshine', 'error');
+            }
+        }
+
+        async function restartSunshine() {
+            showMessage('sunshine-message', 'Restarting Sunshine...', 'info');
+            try {
+                const response = await fetch('/api/sunshine/restart', { method: 'POST' });
+                const data = await response.json();
+                showMessage('sunshine-message', data.message, data.success ? 'success' : 'error');
+                setTimeout(fetchStatus, 2000);
+            } catch (error) {
+                showMessage('sunshine-message', 'Failed to restart Sunshine', 'error');
+            }
+        }
+
+        function showMessage(elementId, message, type) {
+            const el = document.getElementById(elementId);
+            el.innerHTML = `<div class="message ${type}">${message}</div>`;
+            if (type !== 'info') {
+                setTimeout(() => { el.innerHTML = ''; }, 5000);
+            }
+        }
+
+        function copyIP() {
+            const ip = document.getElementById('connect-ip').textContent;
+            navigator.clipboard.writeText(ip).then(() => {
+                alert('Copied to clipboard: ' + ip);
+            });
+        }
+
+        // Initial load
+        fetchStatus();
+        // Auto-refresh every 5 seconds
+        updateInterval = setInterval(fetchStatus, 5000);
+
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            if (e.ctrlKey && e.key === 's') {
+                e.preventDefault();
+                window.open('https://localhost:47990', '_blank');
+            }
+            if (e.ctrlKey && e.key === 'r') {
+                e.preventDefault();
+                restartSunshine();
+            }
+        });
+    </script>
+</body>
+</html>
