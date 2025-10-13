@@ -41,6 +41,8 @@ Already installed and configured! Services start automatically on boot:
 
 ## Usage
 
+**📋 [Complete Keyboard Shortcuts Guide →](KEYBOARD-SHORTCUTS.md)**
+
 ### Connecting from Mac
 
 1. Make sure Tailscale is running on both machines
