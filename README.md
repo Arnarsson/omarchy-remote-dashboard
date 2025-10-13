@@ -192,6 +192,31 @@ systemctl --user restart sunshine
 3. Verify all monitors are detected: `hyprctl monitors`
 4. Restart Sunshine: `systemctl --user restart sunshine`
 
+### Mouse lag / stuttering / unresponsive input
+
+**Problem**: Mouse feels sluggish, laggy, or stutters during streaming.
+
+**Solution**: The configuration has been optimized with low-latency settings:
+```bash
+# Settings already added to ~/.config/sunshine/sunshine.conf:
+nvenc_preset = 1                    # Fastest encoding
+nvenc_realtime_hags = enabled       # Hardware GPU scheduling
+nvenc_latency_over_power = enabled  # Prioritize latency over power
+minimum_fps_target = 15             # Maintain responsiveness
+```
+
+**Additional fixes:**
+1. **View performance stats**: Press `Ctrl + Alt + Shift + S` during streaming to see where lag is (encode/network/decode)
+2. **Check hardware decoding**: Make sure Moonlight is using hardware decode (not software)
+3. **Reduce resolution**: Try 1920x1080 in Moonlight settings instead of 5760x1080
+4. **Lower FEC**: If network is stable, reduce `fec_percentage` from 20 to 10 in sunshine.conf
+5. **Disable vsync**: Run `nvidia-settings` and disable "sync to vblank" or set to "fast"
+
+**If still laggy after these fixes:**
+- Attach a physical mouse to the Omarchy host and test (rules out software issues)
+- Test on Xorg instead of Wayland if using Wayland
+- Check `nvidia-smi` to ensure GPU isn't throttling
+
 ### Stream is laggy/stuttering on slow connection
 1. Lower bitrate in Moonlight settings (try 5-8 Mbps)
 2. Lower resolution in Moonlight (try 1920x1080 instead of 5760x1080)
