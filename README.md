@@ -85,19 +85,20 @@ When streaming, Moonlight captures your mouse and keyboard. To switch Mac deskto
 
 #### Clipboard Sync (Copy/Paste Between Mac and Linux)
 
-**Bidirectional clipboard is enabled!** Copy/paste works automatically:
+Clipboard sync is built into Moonlight/Sunshine with a keyboard shortcut:
 
 **Mac → Linux (Omarchy):**
 1. Copy text on your Mac (`Cmd + C`)
-2. While streaming, press `Ctrl + Alt + Shift + V` to paste on Omarchy
-3. Or just paste normally (`Ctrl + V`) if input is captured
+2. While streaming in Moonlight, press `Ctrl + Alt + Shift + V`
+3. This pastes your Mac clipboard directly on Omarchy
 
 **Linux (Omarchy) → Mac:**
-1. Copy text on Omarchy (`Ctrl + C` in apps)
-2. Switch to Mac (release capture with `Ctrl + Alt + Shift + Z`)
-3. Paste on Mac (`Cmd + V`) - clipboard syncs automatically!
+Unfortunately, clipboard sync from Linux to Mac is not fully supported. Workarounds:
+- Use a cloud clipboard service (Dropbox, Google Keep, etc.)
+- SSH and pipe through clipboard: `ssh omarchy "cat file.txt" | pbcopy`
+- Use the Raycast extension API to send text
 
-The clipboard syncs in real-time during streaming via Sunshine's built-in clipboard support.
+**Note:** Moonlight's `Ctrl + Alt + Shift + V` is the primary way to transfer clipboard from Mac to Linux during streaming.
 
 ### Web Dashboard
 
