@@ -230,3 +230,31 @@ change. tests/run.sh now puts /usr/bin ahead of the caller's PATH. 176 checks, 3
 
 Not verified on hardware: the SSH rung from the Mac itself (cannot be driven from here;
 covered by stubs and by the netmap authorization check above).
+
+## 2026-10-14 (late) — dictation from either microphone
+
+Moonlight owns the keyboard while streaming, so Option+X always reaches the PC, never macOS.
+The PC therefore drives dictation: `omarchy-stream dictate start|stop` is bound to Option+X
+press/release for the session. With mic=host it calls voxtype directly (unchanged); with
+mic=mac it only flips ~/.config/omarchy-stream/dictate.state, which the Mac is watching on a
+held-open GET /api/dictate (25 s, 50 ms granularity). The Mac records while the key is down and
+POSTs the WAV; the PC transcribes with voxtype and types it with wtype.
+
+Verified live on the host:
+- POST /api/dictate/mic/mac -> {"ok": true, "mic": "mac"}; `dictate start` writes "rec".
+- Long poll: answered 0.13 s after the key press (1.63 s against a 1.5 s delay), and a poll
+  with nothing happening returns after its full 25 s. voxtype left idle, not stuck recording.
+- POST /api/dictate with a 32 KB 220 Hz tone: voxtype ran (5.3 s), recognised nothing, logged
+  "nothing recognised", typed nothing, {"ok": false}. The whole upload path works.
+- voxtype prints the transcript on its stderr INFO line, not stdout, which `run()` was dropping;
+  transcribe_and_type now reads both streams.
+
+Two bugs the stubs caught, both real:
+- bash starts background jobs with SIGINT ignored, so `kill -INT` never reached the recorder:
+  the loop then waited forever and dictation died for the rest of the session. Now SIGTERM
+  (ffmpeg and sox both finalise the WAV header on it), with a 2 s escalation to SIGKILL.
+- the recorder's temp path needed a .wav extension for ffmpeg to pick the WAV muxer.
+
+Not verified on hardware: speech -> text -> wtype (no TTS here to synthesise speech, and typing
+into the live session is intrusive), and the entire Mac half (recorder, mic permission, upload).
+Needs `brew install sox` (or ffmpeg) on the Mac, and macOS will ask for Microphone permission.

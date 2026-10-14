@@ -32,7 +32,9 @@ while true; do
   if [[ $CLIPBOARD == 1 ]]; then K="Clipboard sync: On (turn off)"; else K="Clipboard sync: Off (turn on)"; fi
   AUDIO=mac; [[ -f $conf ]] && AUDIO=$(grep -E '^AUDIO=' "$conf" | tail -1 | cut -d= -f2); AUDIO=${AUDIO:-mac}
   if [[ $AUDIO == host ]]; then S="Sound: Omarchy speakers (switch to Mac)"; else S="Sound: this Mac (switch to Omarchy)"; fi
-  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$R\", \"$S\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
+  MIC=host; [[ -f $conf ]] && MIC=$(grep -E '^DICTATE_MIC=' "$conf" | tail -1 | cut -d= -f2 | cut -d' ' -f1); MIC=${MIC:-host}
+  if [[ $MIC == mac ]]; then D="Dictation mic: this Mac (switch to Omarchy)"; else D="Dictation mic: Omarchy (switch to this Mac)"; fi
+  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$R\", \"$S\", \"$K\", \"$D\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
   case "$choice" in
     "$V") mode=virtual; break ;;
     "$M") mode=all; break ;;
@@ -45,6 +47,14 @@ while true; do
     "$K") new=$(( 1 - CLIPBOARD ))
           if grep -q '^CLIPBOARD=' "$conf"; then sed -i.bak "s/^CLIPBOARD=.*/CLIPBOARD=$new/" "$conf" && rm -f "$conf.bak"
           else echo "CLIPBOARD=$new" >> "$conf"; fi ;;
+    "$D") if [[ $MIC == mac ]]; then new=host; else new=mac; fi
+          if grep -q '^DICTATE_MIC=' "$conf"; then sed -i.bak "s/^DICTATE_MIC=.*/DICTATE_MIC=$new/" "$conf" && rm -f "$conf.bak"
+          else echo "DICTATE_MIC=$new" >> "$conf"; fi
+          curl -fsS -m 5 -X POST -H "Authorization: Bearer ${TOKEN:-}" \
+            "http://$HOST:$DASHBOARD_PORT/api/dictate/mic/$new" >/dev/null 2>&1 || true
+          if [[ $new == mac ]] && ! command -v sox >/dev/null && ! command -v ffmpeg >/dev/null; then
+            osascript -e "display dialog \"Dictation from this Mac needs a recorder. In Terminal:\n\nbrew install sox\n\nmacOS asks for Microphone permission the first time you hold Option+X.\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1" >/dev/null
+          fi ;;
     *) exit 0 ;;   # cancelled
   esac
 done

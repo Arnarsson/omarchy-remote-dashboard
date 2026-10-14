@@ -356,6 +356,14 @@ def remote_access_results():
                              "starts on boot" if on else "does not start on boot",
                              None if on else f"systemctl --user enable {unit}"))
 
+    vox, typer = shutil.which("voxtype"), shutil.which("wtype")
+    if vox:
+        whose = "this PC's" if dictate_mic() == "host" else "the Mac's"
+        results.append(check("dictation", "ok" if typer else "warn",
+                             f"Option+X while streaming, {whose} microphone"
+                             + ("" if typer else "; no wtype, so the text only lands on the clipboard"),
+                             None if typer else "yay -S wtype"))
+
     who = autologin_user()
     results.append(check("autologin", "ok" if who else "warn",
                          f"TTY1 logs in as {who}, so a reboot brings the desktop back" if who else
@@ -609,11 +617,11 @@ def stream_keys(on):
     """Bindings that only exist while a stream is up. Lua configs take `eval`; legacy ones `keyword`."""
     me = APP_DIR / "omarchy-stream"
     keys = STREAM_KEYS + [("CTRL + ALT + Q", f'hl.dsp.exec_cmd("{me} disconnect")', f"CTRL ALT,Q,exec,{me} disconnect")]
-    # Option+X: hold to dictate with voxtype, like the local Option+X (which is MOD5 there, plain Alt
-    # through Moonlight). The PC's microphone does the listening.
+    # Option+X: hold to dictate, like the local Option+X (which is MOD5 there, plain Alt through
+    # Moonlight). Which microphone listens is a setting; `dictate` handles both.
     if shutil.which("voxtype"):
-        keys += [("ALT + X", 'hl.dsp.exec_cmd("voxtype record start")', "ALT,X,exec,voxtype record start"),
-                 ("ALT + X", 'hl.dsp.exec_cmd("voxtype record stop")', "ALT,X,exec,voxtype record stop", "release")]
+        keys += [("ALT + X", f'hl.dsp.exec_cmd("{me} dictate start")', f"ALT,X,exec,{me} dictate start"),
+                 ("ALT + X", f'hl.dsp.exec_cmd("{me} dictate stop")', f"ALT,X,exec,{me} dictate stop", "release")]
     for lua_keys, lua_dsp, legacy, *release in keys:
         if on:
             opts = "description = \"omarchy-stream\"" + (", release = true" if release else "")
@@ -670,6 +678,73 @@ def cmd_audio_apply(_args):
     return 0
 
 
+# --------------------------------------------------------------------------- dictation
+
+DICTATE_MIC = STATE_DIR / "dictate.mic"       # host (this PC's mic) or mac
+DICTATE_STATE = STATE_DIR / "dictate.state"   # idle or rec, watched by the Mac over a long poll
+DICTATE_LOG = STATE_DIR / "dictate.log"
+
+
+def dictate_mic():
+    try:
+        return "mac" if DICTATE_MIC.read_text().strip() == "mac" else "host"
+    except OSError:
+        return "host"
+
+
+def dictate_log(line):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(DICTATE_LOG, "a") as f:
+        f.write(f"{time.strftime('%H:%M:%S')} {line}\n")
+
+
+def set_dictate_state(value):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    DICTATE_STATE.write_text(value)
+
+
+def cmd_dictate(args):
+    """Option+X while streaming. With the PC's mic, voxtype does it all; with the Mac's, this only
+    flips a flag the Mac is watching, and the audio comes back to /api/dictate."""
+    if dictate_mic() == "host":
+        run(["voxtype", "record", args.action], timeout=10)
+        return 0
+    set_dictate_state("rec" if args.action == "start" else "idle")
+    dictate_log(f"mac mic: {args.action}")
+    return 0
+
+
+def transcribe_and_type(wav):
+    """voxtype prints the model's chatter on stdout and the text on its INFO line on stderr,
+    so both streams are read here."""
+    try:
+        p = subprocess.run(["voxtype", "transcribe", str(wav)], capture_output=True, text=True, timeout=180)
+        out, code = (p.stdout or "") + (p.stderr or ""), p.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        out, code = str(e), 127
+    if code != 0:
+        dictate_log(f"transcribe failed rc={code}")
+        return ""
+    m = re.search(r'Transcription completed in [\d.]+s: "(.*)"', out)
+    if m:
+        text = m.group(1)
+    else:   # older voxtype: just the text, with the model's loading chatter around it
+        noise = ("Loading", "Audio format", "Processing", "whisper", "ggml", "voxtype")
+        lines = [ln.strip() for ln in out.splitlines()
+                 if ln.strip() and not ln.startswith(noise) and " INFO" not in ln and " WARN" not in ln]
+        text = lines[-1] if lines else ""
+    text = text.strip()
+    if not text:
+        dictate_log("nothing recognised")
+        return ""
+    if shutil.which("wtype"):
+        _, code = run(["wtype", "--", text], timeout=30)
+    else:
+        _, code = (run(["wl-copy", "--", text], timeout=10))  # no wtype: at least leave it on the clipboard
+    dictate_log(f"typed {len(text)} chars rc={code}: {text[:60]}")
+    return text
+
+
 def lock_session():
     """Omarchy locks via omarchy-system-lock (omarchy-shell); hypridle may not be running to
     act on logind's Lock signal. From a service, name the graphical session explicitly."""
@@ -701,6 +776,7 @@ def cmd_hook(args):
         if cfg["stream_keys"]:
             stream_keys(True)
             state["keys"] = True
+        set_dictate_state("idle")   # a stuck "rec" from a dropped session would record forever
         # Sunshine opens its recording stream just after this hook; mute/unmute it in the background.
         subprocess.Popen([str(APP_DIR / "omarchy-stream"), "audio-apply"], start_new_session=True,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -716,6 +792,7 @@ def cmd_hook(args):
         set_hypr_option("cursor:invisible", False)
     if state.get("keys"):
         stream_keys(False)
+    set_dictate_state("idle")
     SESSION_FILE.unlink(missing_ok=True)
     if cfg["lock_on_disconnect"]:
         lock_session()
@@ -987,6 +1064,7 @@ def mac_client_env(token, dash_port):
         "TOKEN": token,
         "DASHBOARD_PORT": dash_port,
         "HOST_USER": os.environ.get("USER", ""),   # who to SSH in as when the dashboard is dead
+        "DICTATE_MIC": "host",     # whose mic Option+X uses: host (this PC) or mac
     }.items())
 
 
@@ -1146,6 +1224,20 @@ def make_handler(token):
                     return self.send(304, b"", "text/plain")
                 clip_log(f"Linux->Mac {ctype} {len(data)} bytes")
                 return self.send(200, data, ctype)
+            if self.path.startswith("/api/dictate"):
+                # Long poll: the Mac holds this open and learns the moment Option+X goes down,
+                # so recording starts with no polling chatter and no delay.
+                from urllib.parse import parse_qs, urlparse
+                have = (parse_qs(urlparse(self.path).query).get("have") or [""])[0]
+                deadline = time.time() + 25
+                while True:
+                    try:
+                        now = DICTATE_STATE.read_text().strip() or "idle"
+                    except OSError:
+                        now = "idle"
+                    if now != have or time.time() > deadline:
+                        return self.send(200, {"state": now, "mic": dictate_mic()})
+                    time.sleep(0.05)
             if self.path == "/mac/omarchy-connect":  # the app self-updates from here
                 return self.send(200, (APP_DIR / "mac/omarchy-connect").read_bytes(), "text/x-shellscript")
             if self.path == "/mac/app/omarchy-remote":
@@ -1188,6 +1280,22 @@ def make_handler(token):
                 ok = clipboard_set(self.rfile.read(n), ctype)
                 clip_log(f"Mac->Linux {ctype} {n} bytes {'ok' if ok else 'FAILED'}")
                 return self.send(200 if ok else 500, {"ok": ok})
+            m = re.fullmatch(r"/api/dictate/mic/(host|mac)", self.path)
+            if m:
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                DICTATE_MIC.write_text(m.group(1))
+                set_dictate_state("idle")
+                return self.send(200, {"ok": True, "mic": m.group(1)})
+            if self.path == "/api/dictate":  # the Mac's recording of what you just said
+                n = int(self.headers.get("Content-Length") or 0)
+                if n <= 0 or n > 16 * 1024 * 1024:
+                    return self.send(400, {"error": "bad size"})
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                wav = STATE_DIR / "dictate.wav"
+                wav.write_bytes(self.rfile.read(n))
+                dictate_log(f"Mac mic: {n} bytes")
+                text = transcribe_and_type(wav)
+                return self.send(200, {"ok": bool(text), "text": text})
             if self.path == "/api/rescue":  # the Mac's "Fix connection": restart Sunshine, keep this server up
                 info = rescue_streams()
                 return self.send(200, {"ok": info["state"] == "active", **info})
@@ -1273,6 +1381,8 @@ def main():
     v = sub.add_parser("virtual"); v.add_argument("spec"); v.set_defaults(fn=cmd_virtual)
     sub.add_parser("mac", help="print the one-line Mac setup command").set_defaults(fn=cmd_mac)
     sub.add_parser("rescue", help="restart the dashboard and Sunshine; safe to run over SSH").set_defaults(fn=cmd_rescue)
+    di = sub.add_parser("dictate", help=argparse.SUPPRESS)
+    di.add_argument("action", choices=["start", "stop"]); di.set_defaults(fn=cmd_dictate)
     sub.add_parser("disconnect", help="end all running streams").set_defaults(fn=cmd_disconnect)
     sub.add_parser("audio-apply", help=argparse.SUPPRESS).set_defaults(fn=cmd_audio_apply)
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, help="default: dashboard_port in config.json (8080)")

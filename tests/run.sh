@@ -21,7 +21,12 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 [ "$2" = show ] && echo "${MAINPID:-0}"; exit 0'
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
 stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
-stub voxtype   'echo "voxtype $*" >> "$LOG"'
+stub voxtype   'echo "voxtype $*" >> "$LOG"
+[ "$1" = transcribe ] && echo "Transcription completed in 0.42s: \"hello from the mac\"" >&2
+exit 0'
+stub wtype     'echo "wtype $*" >> "$LOG"'
+stub ffmpeg    'echo "FFMPEG $*" >> "$LOG"; for a in "$@"; do last=$a; done; printf "RIFFfake" > "$last"; exec sleep 5'
+stub sox       'echo "SOX $*" >> "$LOG"; for a in "$@"; do last=$a; done; printf "RIFFfake" > "$last"; exec sleep 9'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
 stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
   echo "64 bytes from 100.73.206.17: icmp_seq=$i ttl=64 time=$r ms"; i=$((i+1)); done'
@@ -157,10 +162,18 @@ echo '{}' > "$HOME/.config/omarchy-stream/config.json"
 check "connect adds stream keys"          'grep -q "hyprctl eval hl.bind(\"CTRL + ALT + 1\", hl.dsp.focus({ workspace = \"1\", on_current_monitor = true })" "$LOG" && grep -q "hl.bind(\"CTRL + ALT + Q\", hl.dsp.exec_cmd(\".*omarchy-stream disconnect\")" "$LOG"'
 : > "$LOG.connect"; cp "$LOG" "$LOG.connect"; : > "$LOG"; "$CLI" hook disconnect
 check "disconnect removes stream keys"    '[ "$(grep -c "hl.unbind(\"CTRL + ALT" "$LOG")" = 6 ]'
-check "connect adds Option+X dictation"   'grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\"voxtype record stop\"), { description = \"omarchy-stream\", release = true })" "$LOG.connect" && grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\"voxtype record start\"), { description = \"omarchy-stream\" })" "$LOG.connect"'
+check "connect adds Option+X dictation"   'grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\".*omarchy-stream dictate stop\"), { description = \"omarchy-stream\", release = true })" "$LOG.connect" && grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\".*omarchy-stream dictate start\"), { description = \"omarchy-stream\" })" "$LOG.connect"'
 check "disconnect removes Option+X"       'grep -q "hl.unbind(\"ALT + X\")" "$LOG"'
+D=$HOME/.config/omarchy-stream
+check "Option+X: PC mic drives voxtype"   ': > "$LOG"; "$CLI" dictate start; "$CLI" dictate stop; grep -q "voxtype record start" "$LOG" && grep -q "voxtype record stop" "$LOG"'
+echo mac > "$D/dictate.mic"; : > "$LOG"; "$CLI" dictate start
+check "Option+X: Mac mic only flags it"   '[ "$(cat "$D/dictate.state")" = rec ] && ! grep -q voxtype "$LOG"'
+"$CLI" dictate stop
+check "releasing Option+X stops the mic"  '[ "$(cat "$D/dictate.state")" = idle ]'
+"$CLI" dictate start; "$CLI" hook connect
+check "a dropped session clears the mic"  '[ "$(cat "$D/dictate.state")" = idle ]'; "$CLI" hook disconnect; rm -f "$D/dictate.mic"
 : > "$LOG"; LEGACY=1 "$CLI" hook connect; LEGACY=1 "$CLI" hook disconnect
-check "legacy Hyprland: keyword binds"    'grep -q "hyprctl keyword bind CTRL ALT,3,focusworkspaceoncurrentmonitor,3" "$LOG" && grep -q "hyprctl keyword unbind CTRL ALT,Q" "$LOG" && grep -q "hyprctl keyword bindr ALT,X,exec,voxtype record stop" "$LOG"'
+check "legacy Hyprland: keyword binds"    'grep -q "hyprctl keyword bind CTRL ALT,3,focusworkspaceoncurrentmonitor,3" "$LOG" && grep -q "hyprctl keyword unbind CTRL ALT,Q" "$LOG" && grep -q "hyprctl keyword bindr ALT,X,exec,.*dictate stop" "$LOG"'
 echo 2 > "$STATE/vrr"; LUA=1 "$CLI" hook connect
 check "Lua Hyprland: VRR off via eval"    '[ "$(cat "$STATE/vrr")" = 0 ]'
 LUA=1 "$CLI" hook disconnect
@@ -261,6 +274,16 @@ check "Mac audio: Sunshine copy unmuted"  'grep -q "pactl set-source-output-mute
 check "rescue API restarts Sunshine"      'grep -q "systemctl --user restart sunshine" "$LOG" && grep -q "\"unit\": \"sunshine\"" "$WORK/rescue.json" && grep -q "\"hyprland\"" "$WORK/rescue.json"'
 check "rescue API keeps itself alive"     '! grep -q "restart omarchy-stream-dashboard" "$LOG"'
 check "rescue needs the token"            '[ "$(curl -s -o /dev/null -w %{http_code} -X POST localhost:$PORT/api/rescue)" = 401 ]'
+check "dictation mic switches to the Mac" 'curl -s -X POST "${A[@]}" localhost:$PORT/api/dictate/mic/mac | grep -q "\"mic\": \"mac\"" && [ "$(cat "$HOME/.config/omarchy-stream/dictate.mic")" = mac ]'
+check "mic poll answers the state now"    'curl -s -m 5 "${A[@]}" "localhost:$PORT/api/dictate?have=rec" | grep -q "\"state\": \"idle\""'
+printf "RIFF....WAVEfmt " > "$WORK/tone.wav"
+echo rec > "$HOME/.config/omarchy-stream/dictate.state"
+check "mic poll wakes on Option+X"        'curl -s -m 5 "${A[@]}" "localhost:$PORT/api/dictate?have=idle" | grep -q "\"state\": \"rec\""'
+: > "$LOG"; curl -s -X POST "${A[@]}" -H "Content-Type: audio/wav" --data-binary @"$WORK/tone.wav" localhost:$PORT/api/dictate > "$WORK/dict.json"
+check "Mac audio is transcribed and typed" 'grep -q "voxtype transcribe" "$LOG" && grep -q "wtype -- hello from the mac" "$LOG" && grep -q "\"text\": \"hello from the mac\"" "$WORK/dict.json"'
+check "dictation logged on the host"      'grep -q "Mac mic: .* bytes" "$HOME/.config/omarchy-stream/dictate.log"'
+check "dictation needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} -X POST --data-binary x localhost:$PORT/api/dictate)" = 401 ]'
+curl -s -X POST "${A[@]}" localhost:$PORT/api/dictate/mic/host >/dev/null
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -374,6 +397,11 @@ sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
 export CONNECT_SRC=$ROOT/mac/omarchy-connect LAUNCHER_SRC=$ROOT/mac/app/omarchy-remote
 stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *api/clipboard*-X*|*-X*api/clipboard*) [ -f "$STATE/curlfail" ] && { rm -f "$STATE/curlfail"; exit 7; } ;; esac
 case "$*" in *api/rescue*) [ -f "$STATE/rescuefail" ] && exit 7; echo "{\"ok\": true, \"unit\": \"sunshine\", \"state\": \"active\", \"hyprland\": true}"; exit 0 ;; esac
+case "$*" in
+  *-X*api/dictate*|*api/dictate*-X*) echo "{\"ok\": true, \"text\": \"hello from the mac\"}"; exit 0 ;;
+  *"api/dictate?have=idle"*) echo "{\"state\": \"rec\", \"mic\": \"mac\"}"; exit 0 ;;
+  *"api/dictate?have=rec"*) sleep 0.3; echo "{\"state\": \"idle\", \"mic\": \"mac\"}"; exit 0 ;;
+esac
 case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
 src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; *-X*) ;; *api/clipboard*) [ -f "$STATE/hostclip" ] && src=$STATE/hostclip ;; esac
 [ -n "$src" ] && while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$src" "$2"; shift; done; exit 0'
@@ -402,6 +430,16 @@ touch "$STATE/sshfail"; : > "$LOG"; out=$("$MC" rescue 2>&1) || true
 check "fix: says when the PC is gone"     'grep -q "could not reach the PC" <<<"$out" && grep -q "^TSSSH" "$LOG" && grep -q "^SSH" "$LOG"'
 check "fix: a dead PC exits non-zero"     '! "$MC" rescue >/dev/null 2>&1'
 rm -f "$STATE/rescuefail" "$STATE/sshfail"
+# Dictation with the Mac's mic: the PC flips a flag, the Mac records and posts the audio back.
+CE=$HOME/.config/omarchy-stream/client.env
+echo "DICTATE_MIC=mac" >> "$CE"; : > "$LOG"; DL=$WORK/dict.log
+DICTLOG=$DL CLIPBOARD=0 ML_HOOK="sleep 1.2" "$MC" all >/dev/null
+check "mic: records when Option+X goes down" 'grep -q "recording" "$DL" && grep -q "FFMPEG .*-f avfoundation .*-ar 16000 -ac 1" "$LOG"'
+check "mic: audio posted to the PC"       'grep -q "sent 8 bytes -> .*hello from the mac" "$DL" && grep -q "CURL .*-X POST .*audio/wav.*api/dictate" "$LOG"'
+check "mic: stops with the session"       'sleep 0.3; ! pgrep -f "api/dictate?have" >/dev/null'
+sed -i 's/^DICTATE_MIC=.*/DICTATE_MIC=host/' "$CE"; : > "$LOG"; : > "$DL"
+CLIPBOARD=0 ML_HOOK="sleep 0.4" "$MC" all >/dev/null
+check "mic: PC mic means no Mac recorder" '! grep -q FFMPEG "$LOG" && [ ! -s "$DL" ]'
 section "Mac app (Omarchy Remote.app)"
 L2="$APPB/Contents/MacOS/omarchy-remote"
 echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
@@ -442,6 +480,10 @@ HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.8" "$L2"
 check "app: connect keeps Mac clipboard"  '[ "$(cat "$STATE/macclip")" = mine ]'; rm -f "$STATE/hostclip"
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 check "app: main monitor choice"          'grep -q "MOONLIGHT stream 100.73.206.17 Desktop --resolution" "$LOG"'
+printf "Dictation mic: Omarchy (switch to this Mac)\nfalse\n" > "$STATE/choices"; : > "$LOG"; HOME=$MH "$L2"
+check "app: menu moves the mic to the Mac" 'grep -q "^DICTATE_MIC=mac$" "$MH/.config/omarchy-stream/client.env" && grep -q "api/dictate/mic/mac" "$LOG" && grep -q "Dictation mic: this Mac (switch to Omarchy)" "$LOG"'
+printf "Dictation mic: this Mac (switch to Omarchy)\nfalse\n" > "$STATE/choices"; : > "$LOG"; HOME=$MH "$L2"
+check "app: menu moves it back to the PC" 'grep -q "^DICTATE_MIC=host$" "$MH/.config/omarchy-stream/client.env" && grep -q "api/dictate/mic/host" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE="Fix connection (restart the PC's streaming)" "$L2"
 check "app: fix connection is a click"    'grep -q "api/rescue" "$LOG" && grep -q "OSA -e display dialog .*Sunshine restarted" "$LOG" && ! grep -q MOONLIGHT "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE=false "$L2"

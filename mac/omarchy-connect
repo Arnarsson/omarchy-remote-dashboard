@@ -27,6 +27,7 @@ VIRTUAL_PORT=48989
 TOKEN=                       # host: cat ~/.config/omarchy-stream/token  (needed for `virtual`)
 DASHBOARD_PORT=8080
 HOST_USER=                   # your username on the host; used by `rescue` when the dashboard is down
+DICTATE_MIC=host             # whose microphone Option+X uses while streaming: host (the PC) or mac
 CFG
   chmod 600 "$CONF"
   echo "Created $CONF - edit HOST/DESKTOP_RES (and TOKEN for virtual), then rerun."; exit 0
@@ -173,6 +174,64 @@ function run(argv){ var dir = argv[0], pb = $.NSPasteboard.generalPasteboard, c 
       if (t && !t.isNil()) d = $.NSBitmapImageRep.imageRepWithData(t).representationUsingTypeProperties(4, $()); }
     if (d && !d.isNil()) { var q = dir + "/i" + k + ".png"; d.writeToFileAtomically(q, true); out("png " + q); } } }'
 
+# Dictation with the Mac's microphone (DICTATE_MIC=mac), for when you are nowhere near the PC.
+# Moonlight owns the keyboard while streaming, so Option+X reaches the PC, not macOS: the PC
+# flips a flag, this loop hears it on a held-open request, records, and posts the audio back.
+# The PC transcribes it with voxtype and types it into whatever has focus there.
+recorder() {   # prints a command that records 16 kHz mono WAV to $1 until killed
+  if command -v ffmpeg >/dev/null; then echo "ffmpeg -nostdin -hide_banner -loglevel error -f avfoundation -i :default -ar 16000 -ac 1 -y $1"
+  elif command -v sox >/dev/null; then echo "sox -q -d -r 16000 -c 1 -b 16 $1"
+  elif command -v rec >/dev/null; then echo "rec -q -r 16000 -c 1 -b 16 $1"
+  fi
+}
+
+mic_sync() {
+  [[ ${DICTATE_MIC:-host} == mac && -n ${TOKEN:-} ]] || return 0
+  set +e +o pipefail
+  local url="http://$HOST:$DASHBOARD_PORT/api/dictate" auth="Authorization: Bearer $TOKEN"
+  local log="${DICTLOG:-$HOME/Library/Logs/omarchy-dictation.log}"; mkdir -p "$(dirname "$log")" 2>/dev/null
+  dlog() { echo "$(date +%H:%M:%S) $*" >> "$log"; }
+  local wav cmd state=idle want rec_pid=""
+  wav=$(mktemp -d)/rec.wav   # ffmpeg picks the WAV muxer from the extension
+  cmd=$(recorder "$wav")
+  if [[ -z $cmd ]]; then
+    dlog "no recorder: install one with 'brew install sox'"
+    notify "Dictation needs a recorder: brew install sox"
+    return 0
+  fi
+  dlog "start (recorder: ${cmd%% *})"
+  trap '[[ -n $rec_pid ]] && kill $rec_pid 2>/dev/null; exit 0' TERM INT
+  while :; do
+    # Held open by the PC until the state changes, so pressing Option+X starts recording at once.
+    want=$(curl -fsS -m 30 -H "$auth" "$url?have=$state" 2>/dev/null | sed -n 's/.*"state": *"\([a-z]*\)".*/\1/p')
+    [[ -z $want ]] && { sleep 1; continue; }
+    [[ $want == "$state" ]] && continue
+    state=$want
+    if [[ $state == rec ]]; then
+      rm -f "$wav"; $cmd >>"$log" 2>&1 & rec_pid=$!
+      dlog "recording"
+    else
+      # SIGTERM, not SIGINT: bash starts background jobs with SIGINT ignored, so only TERM
+      # reaches the recorder, and ffmpeg/sox both finalise the WAV header on it. Never wait
+      # forever either, or one stubborn recorder ends dictation for the rest of the session.
+      if [[ -n $rec_pid ]]; then
+        kill $rec_pid 2>/dev/null
+        local i=0
+        while kill -0 $rec_pid 2>/dev/null && (( i < 20 )); do sleep 0.1; i=$((i+1)); done
+        kill -9 $rec_pid 2>/dev/null; wait $rec_pid 2>/dev/null; rec_pid=""
+      fi
+      if [[ -s $wav ]]; then
+        local said
+        said=$(curl -fsS -m 60 -X POST -H "$auth" -H "Content-Type: audio/wav" --data-binary @"$wav" "$url" 2>/dev/null)
+        dlog "sent $(wc -c < "$wav" | tr -d ' ') bytes -> ${said:-no answer}"
+      else
+        dlog "nothing recorded (microphone permission?)"
+        notify "Nothing recorded: check Microphone permission for Omarchy Remote"
+      fi
+    fi
+  done
+}
+
 clip_sync() {
   [[ ${CLIPBOARD:-1} == 1 && -n ${TOKEN:-} ]] || return 0
   set +e +o pipefail   # runs in its own subshell: one failed curl/osascript must not end the loop
@@ -312,11 +371,12 @@ case "${1:-all}" in
     [[ -n ${TOKEN:-} ]] && api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
     wifi_quiet; stamp moonlight; report all &
     clip_sync & clip=$!
+    mic_sync & mic=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     mllog=$(mktemp)
     "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
     send_log all "$mllog"
-    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
+    kill $clip ${mic:-} 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
   virtual)
     need_token
     stamp start; measure; stamp measured
@@ -331,11 +391,12 @@ case "${1:-all}" in
     api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
     wifi_quiet; stamp moonlight; report virtual &
     clip_sync & clip=$!
+    mic_sync & mic=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     mllog=$(mktemp)
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
     send_log virtual "$mllog"
-    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
+    kill $clip ${mic:-} 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
     echo "Virtual display removed." ;;
   multi)

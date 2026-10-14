@@ -28,8 +28,14 @@ your Mac clipboard. Toggle it in the menu (on by default).
 office). With PC speakers, Sunshine's copy is muted so you don't hear it twice.
 
 **Stream keys.** While streaming: Ctrl+Option+1…5 brings a workspace to the screen you're
-watching, Ctrl+Option+Q disconnects, and holding Option+X dictates (voxtype, PC microphone).
-They exist only during a session.
+watching, Ctrl+Option+Q disconnects, and holding Option+X dictates. They exist only during a
+session.
+
+**Dictation, either microphone.** Hold Option+X, speak, let go, and the words are typed on the
+PC by voxtype (local Whisper, nothing leaves your machines). The PC's microphone by default; pick
+the Mac's in the menu and the Mac records while you hold the key and sends the audio over.
+Moonlight owns the keyboard while you stream, so the PC is what hears the key and asks the Mac
+for audio over a held-open request.
 
 **Smarter connection.** It measures the path before connecting (direct vs relayed, latency
 spikes, loss) and picks the bitrate, capped at 25 Mbps on Wi-Fi. AirDrop (AWDL), a common cause
@@ -64,12 +70,13 @@ launch timing, Moonlight's log and the clipboard log to the PC, so problems can 
 | Fix connection | Restarts the PC's streaming (dashboard, else over SSH) |
 | Sound: this Mac / Omarchy speakers | Toggle where audio plays |
 | Clipboard sync: On / Off | Toggle clipboard sync |
+| Dictation mic: Omarchy / this Mac | Which microphone Option+X listens on |
 
 | Keys while streaming (Option = Alt) | Action |
 |---|---|
 | Ctrl+Option+1 … 5 | Bring that workspace to the screen you're watching |
 | Ctrl+Option+Q | Disconnect |
-| Option+X (hold) | Dictate with voxtype on the PC (uses the PC's microphone) |
+| Option+X (hold) | Dictate: hold, speak, let go (voxtype on the PC) |
 | Ctrl+Option+Shift+Z | Release the mouse to the Mac (Moonlight) |
 | Ctrl+Option+Shift+S | Stats overlay (Moonlight) |
 
@@ -117,13 +124,13 @@ Logs: PC `~/.config/omarchy-stream/{client-report,clipboard}.log`; Mac `~/Librar
 - **Hooks** (Sunshine `global_prep_cmd`): VRR off, stream-only keybindings and audio routing on
   connect; all restored on disconnect.
 - **Dashboard API** (token auth): virtual screen, multi up/down, pairing, clipboard, path check,
-  audio preference, rescue, Mac diagnostics, and the Mac app's self-update files.
+  audio preference, rescue, dictation, Mac diagnostics, and the Mac app's self-update files.
 - **Getting back in**: the dashboard and Sunshine both start at boot and survive logout
   (lingering), the PC never sleeps, and `rescue` runs over SSH with no desktop involved.
 
 ## Tests
 
-`tests/run.sh` runs 176 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
+`tests/run.sh` runs 192 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
 macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API, Mac client and app.
 
 ## Known limits
@@ -135,6 +142,7 @@ macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API,
 - Nothing can start a desktop remotely: if the PC reboots with no TTY autologin, it waits at a
   login prompt and there is nothing to stream. `doctor` warns about it; turning autologin on means
   anyone sitting at the PC has your desktop, so it is your call, not the installer's.
-- Dictation uses the PC's microphone, so it is for when you are near the PC, not truly remote.
+- Dictation from the Mac's microphone needs a recorder there (`brew install sox`, or ffmpeg) and
+  macOS Microphone permission for Omarchy Remote the first time. The PC's own microphone needs neither.
 
 See [KEYBOARD-SHORTCUTS.md](KEYBOARD-SHORTCUTS.md) for more Moonlight and Hyprland shortcuts.
