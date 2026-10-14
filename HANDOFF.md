@@ -63,3 +63,29 @@ multi configs, stream switching and auth all passed. Nothing has run on real har
 5. If the user wants it on GitHub: commit into their repo (Arnarsson/omarchy-remote-dashboard) on a new branch; ask before pushing.
 
 Report results honestly: say what was verified on hardware and what wasn't.
+
+## Not built yet: Omarchy (Linux) MacBook -> Omarchy PC
+
+Asked for 2026-10-14, parked before any code was written. Nothing was changed on the laptop.
+
+The client is macOS-only (pbpaste, osascript, system_profiler, networksetup, AWDL), so the
+Linux laptop needs a sibling script, not a tweak. What the laptop already has
+(OmarchyMacbookSven, 100.71.13.32, reachable by ssh from the PC with key auth):
+- /usr/bin/moonlight (Qt build) and wl-clipboard, notify-send
+- no fuzzel/wofi/walker/rofi on the ssh PATH, so a GUI menu needs checking from inside a session
+- no Hyprland session was running when this was looked at, so nothing GUI could be tested
+- not paired with this PC yet
+
+Sketch for `linux/omarchy-connect`, reusing the dashboard API unchanged:
+- same ~/.config/omarchy-stream/client.env; measure() with `ping -c 10 -i 0.1 -W 3` + /api/path
+- virtual mode: read the laptop's own size from its `hyprctl monitors`, POST /api/virtual/WxH@HZ,S
+- clipboard: `wl-paste --watch` to push (no polling needed, unlike the Mac's JXA watcher) and the
+  same ?have= poll to pull
+- audio: --audio-on-host plus /api/audio/<host|mac>; rescue: the same three rungs, plain ssh works
+- notify-send instead of osascript; a .desktop entry with Actions instead of the app bundle
+
+One real constraint: automatic pairing only works for instances this project creates (it writes
+their web credentials). The main unit (apollo) keeps the user's own Sunshine web password, which
+we cannot read, so pairing the laptop to the main stream means the Sunshine web UI by hand, or
+resetting apollo's web credentials first (which would change the password the user set).
+Pairing can be driven headless with QT_QPA_PLATFORM=offscreen moonlight pair <host> --pin <pin>.
