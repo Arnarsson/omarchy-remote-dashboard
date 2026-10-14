@@ -42,7 +42,7 @@ else
 fi
 getcap "$SUNREAL" 2>/dev/null | grep -q cap_sys_admin \
   || echo "  4. sudo setcap cap_sys_admin+p $SUNREAL   (KMS capture)"
-echo "  5. register session hooks in sunshine.conf (VRR off while streaming, lock screen on disconnect;"
+echo "  5. register session hooks in sunshine.conf (VRR off and stream keys while streaming; optional lock on disconnect;"
 echo "     toggle in ~/.config/omarchy-stream/config.json). Skipped if you already have a global_prep_cmd."
 echo "  6. enable the dashboard and stop running disable-wifi.sh if it is in Hyprland autostart (it is commented out, not deleted)"
 echo "  7. restart $SUNSHINE_UNIT.service so the new settings apply (drops any stream in progress)"
@@ -91,7 +91,7 @@ path, unit, binary, port = sys.argv[1:]
 try:
     cfg = json.load(open(path))
 except (OSError, ValueError):
-    cfg = {"disable_vrr_while_streaming": True, "lock_on_disconnect": True}
+    cfg = {"disable_vrr_while_streaming": True, "lock_on_disconnect": False}
 cfg.update(sunshine_unit=unit, sunshine_bin=binary, dashboard_port=int(port))
 json.dump(cfg, open(path, "w"), indent=2)
 PY

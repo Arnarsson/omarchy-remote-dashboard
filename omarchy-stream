@@ -42,7 +42,8 @@ CONFIG_FILE = STATE_DIR / "config.json"
 SESSION_FILE = STATE_DIR / "session.json"
 DEFAULT_CONFIG = {
     "disable_vrr_while_streaming": True,   # VRR makes captured frame timing uneven
-    "lock_on_disconnect": True,            # don't leave the desktop open at home
+    # Off by default: when you're remote, a locked host can strand you. Turn on for unattended desks.
+    "lock_on_disconnect": False,
     # Off by default: Moonlight runs in capture mode (host cursor only). Hiding it left no cursor at all.
     "hide_host_cursor_while_streaming": False,
     "stream_keys": True,                   # Ctrl+Alt+1..5 bring workspace N here, Ctrl+Alt+Q disconnects

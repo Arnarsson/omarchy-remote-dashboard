@@ -106,7 +106,10 @@ check "--json is valid JSON"              '{ "$CLI" doctor --json; true; } | pyt
 
 # --------------------------------------------------------------------------- hooks
 section "session hooks"
-echo 2 > "$STATE/vrr"; : > "$LOG"
+echo 2 > "$STATE/vrr"; echo '{}' > "$HOME/.config/omarchy-stream/config.json"; : > "$LOG"
+"$CLI" hook connect; "$CLI" hook disconnect
+check "no lock by default"                '! grep -qE "lock-session|OMARCHY-LOCK" "$LOG"'
+echo '{"lock_on_disconnect": true}' > "$HOME/.config/omarchy-stream/config.json"; echo 2 > "$STATE/vrr"; : > "$LOG"
 "$CLI" hook connect
 check "connect turns VRR off"             '[ "$(cat "$STATE/vrr")" = 0 ]'
 "$CLI" hook disconnect

@@ -153,3 +153,4 @@ can be queried. Race found: the hook ran while `virtual off` was already stoppin
 Changes: on Wi-Fi the bitrate ceiling is 25 Mbps (WIFI_MAX_BITRATE_KBPS); the Mac POSTs diagnostics (path, awdl state, PHY/channel/
 signal/noise/tx rate) to /api/report -> ~/.config/omarchy-stream/client-report.log; AUDIO=mac|host with the app asking
 each connect (--audio-on-host); `virtual off` restores the physical monitors' workspaces (layout.json).
+- 11:15 user: lock on disconnect is a 'death sentence' when remote. Now lock_on_disconnect defaults to false (and is set false on this host). Layout restore verified after the 11:15 disconnect (DP-1 1, DP-3 2, HDMI-A-2 3).

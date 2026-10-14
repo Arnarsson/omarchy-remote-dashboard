@@ -23,8 +23,8 @@ v2 of `omarchy-remote-dashboard`. v1 tuned the wrong knobs; v2 fixes the causes:
   `hyprctl dispatch moveworkspacetomonitor <n> OS-VIRTUAL`.
 - **Session hooks**: Sunshine calls `omarchy-stream hook` on connect/disconnect. While
   you stream, Hyprland's VRR is off (it makes captured frame timing uneven); when you
-  disconnect, VRR is restored and the screen locks so your desktop isn't left open at
-  home. Toggle both in `~/.config/omarchy-stream/config.json`.
+  disconnect, VRR is restored. Locking on disconnect is off by default (a locked host can
+  strand you when remote); set `lock_on_disconnect` in `~/.config/omarchy-stream/config.json`.
 - **Adaptive bitrate**: `omarchy-connect` pings the host 10 times first and picks the
   bitrate from what it measures: full on a clean direct path, 70% when slower or with
   a little loss, 40% when slow or lossy, 25% when relayed.
@@ -88,7 +88,7 @@ isn't possible with KMS. Use `multi` or `virtual` for more than the main monitor
 
 ## Tests
 
-`tests/run.sh` runs 130 checks with stubbed system tools (installer, doctor, hooks,
+`tests/run.sh` runs 131 checks with stubbed system tools (installer, doctor, hooks,
 multi/virtual, dashboard API and auth, Mac script bitrate tiers). Run it after any change.
 
 ## Reading the result
