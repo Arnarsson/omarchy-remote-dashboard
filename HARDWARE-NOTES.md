@@ -154,3 +154,12 @@ Changes: on Wi-Fi the bitrate ceiling is 25 Mbps (WIFI_MAX_BITRATE_KBPS); the Ma
 signal/noise/tx rate) to /api/report -> ~/.config/omarchy-stream/client-report.log; AUDIO=mac|host with the app asking
 each connect (--audio-on-host); `virtual off` restores the physical monitors' workspaces (layout.json).
 - 11:15 user: lock on disconnect is a 'death sentence' when remote. Now lock_on_disconnect defaults to false (and is set false on this host). Layout restore verified after the 11:15 disconnect (DP-1 1, DP-3 2, HDMI-A-2 3).
+
+## Session 4 (11:22): audio on host verified, launch about 50 s
+- Audio: Sunshine didn't switch the default sink (no "Setting default sink"); pactl default = analog output.
+- First Mac report: 802.11ax ch36 80 MHz, -37/-91 dBm, 1080 Mbps, awdl0 DOWN (pause worked), rtt 4 ms, p90 80 ms, so it chose 10 Mbps.
+  Signal and AWDL ruled out; idle spikes are maybe power-save/scanning. User: "much better".
+- Launch timeline (host): API about 11:21:58, instance up 11:22:02.2, Moonlight connected 11:22:12.5. The other ~35 s were on the Mac
+  (dialogs, 10 sequential `tailscale ping`s, Moonlight start, fixed 2 s sleep).
+Changes: measure = 1 tailscale ping (path) + `ping -c 10 -i 0.1` (about 1 s); the host polls (mode applied, port listening)
+instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timing line ("timing: start= measured= screen_ready= moonlight=").

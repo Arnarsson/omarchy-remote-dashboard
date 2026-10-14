@@ -38,11 +38,13 @@ TS=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tai
 
 # Measure the path: direct vs relayed, median RTT, loss. Sets BITRATE (kbps) and prints why.
 measure() {
-  local out n_ok rtts median relayed=no factor=100
-  out=$("$TS" ping -c 10 --until-direct=false "$HOST" 2>&1 || true)
-  n_ok=$(grep -c '^pong' <<<"$out" || true)
+  local out pings n_ok rtts median relayed=no factor=100
+  # One Tailscale ping tells direct vs relayed; ten plain pings 0.1 s apart give RTT, spikes and loss (~1 s).
+  out=$("$TS" ping -c 1 --until-direct=false "$HOST" 2>&1 || true)
   grep -q 'via DERP' <<<"$out" && relayed=yes
-  rtts=$(grep -o 'in [0-9.]*ms' <<<"$out" | grep -o '[0-9.]*' | sort -n || true)
+  pings=$(ping -c 10 -i 0.1 -t 3 "$HOST" 2>&1 || true)
+  n_ok=$(grep -c 'bytes from' <<<"$pings" || true)
+  rtts=$(grep -o 'time=[0-9.]*' <<<"$pings" | cut -d= -f2 | sort -n || true)
   if [[ $n_ok -eq 0 ]]; then
     echo "✘ $HOST unreachable over Tailscale. Is Tailscale on, and is the Omarchy PC awake?"; exit 1
   fi
@@ -84,6 +86,7 @@ report() {
   [[ -n ${TOKEN:-} ]] || return 0
   {
     echo "mode=$1 ${PATH_LINE:-}"
+    echo "timing: ${TIMES:-}"
     echo "awdl: $(ifconfig awdl0 2>/dev/null | head -1)"
     sw_vers 2>/dev/null | tr '\n' ' '; echo
     system_profiler SPAirPortDataType 2>/dev/null \
@@ -92,6 +95,10 @@ report() {
   } | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
       "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
 }
+
+# Seconds since the app was clicked, per step (sent in the report).
+T0=${OMARCHY_T0:-$(date +%s)}; TIMES=
+stamp() { TIMES+="$1=$(( $(date +%s) - T0 ))s "; }
 
 # Notification when run from Omarchy Remote.app (no terminal to print to).
 notify() {
@@ -164,27 +171,27 @@ common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullsc
 case "${1:-all}" in
   check) measure ;;
   all)
-    measure
+    stamp start; measure; stamp measured
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
-    wifi_quiet; report all &
+    wifi_quiet; stamp moonlight; report all &
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
-    wifi_restore ;;
+    wifi_restore; wait 2>/dev/null || true ;;
   virtual)
     need_token
-    measure
+    stamp start; measure; stamp measured
     res=$(mac_resolution); [[ -n $res ]] || { echo "Couldn't read this Mac's resolution"; exit 1; }
     scale=1; [[ ${res%x*} -gt 2560 ]] && scale=2
     echo "Creating ${res}@${FPS} (scale ${scale}) virtual display on $HOST ..."; notify "Creating a ${res} screen on Omarchy..."
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
       "http://$HOST:$DASHBOARD_PORT/api/virtual/${res}@${FPS},${scale}" >/dev/null \
       || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
-    sleep 2
+    stamp screen_ready   # the host returns once Sunshine is listening; no fixed wait
     pair_once "$VIRTUAL_PORT" || true
-    wifi_quiet; report virtual &
+    wifi_quiet; stamp moonlight; report virtual &
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
-    wifi_restore
+    wifi_restore; wait 2>/dev/null || true   # let the background report finish
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
     echo "Virtual display removed." ;;
   multi)

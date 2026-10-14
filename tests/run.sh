@@ -22,6 +22,8 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
 stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
+stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
+  echo "64 bytes from 100.73.206.17: icmp_seq=$i ttl=64 time=$r ms"; i=$((i+1)); done'
 stub route     '[ -n "$WIFI" ] && echo "  interface: en0" || echo "  interface: en7"'
 stub networksetup 'printf "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: USB LAN\nDevice: en7\n"'
 stub osascript 'case "$*" in *"choose from list"*) echo "${CHOICE:-false}" ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
@@ -317,7 +319,7 @@ check "virtual needs a token"             '! "$MC" virtual >/dev/null'
 check "multi needs a token"               '! "$MC" multi >/dev/null'
 sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
 export CONNECT_SRC=$ROOT/mac/omarchy-connect
-stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *mac/omarchy-connect*) while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$CONNECT_SRC" "$2"; shift; done ;; esac'
+stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac; case "$*" in *mac/omarchy-connect*) while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$CONNECT_SRC" "$2"; shift; done ;; esac'
 : > "$LOG"; "$MC" multi >/dev/null
 check "multi splits bitrate across 3"     '[ "$(grep -c "OPEN -n -a Moonlight" "$LOG")" = 3 ] && grep -q -- "--bitrate 20000" "$LOG"'
 sed -i 's/^MONITOR_RES=.*/MONITOR_RES="1920x1080 3440x1440 1920x1080"/' "$HOME/.config/omarchy-stream/client.env"
@@ -339,6 +341,7 @@ echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" "$L2"
 check "app: self-updates its client"      'cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && grep -q "CURL .*/mac/omarchy-connect" "$LOG"'
 check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
+check "app: report carries step timing"  'grep -q "timing: start=.*measured=.*screen_ready=.*moonlight=" "$LOG"'
 check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG"'

@@ -3,6 +3,7 @@
 # GUI only: dialogs and notifications instead of a terminal. Log: ~/Library/Logs/omarchy-remote.log
 export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"   # GUI apps start with a minimal PATH
 export OMARCHY_GUI=1
+export OMARCHY_T0=$(date +%s)
 HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
 APPLOG="$HOME/Library/Logs/omarchy-remote.log"
 mkdir -p "$(dirname "$APPLOG")"

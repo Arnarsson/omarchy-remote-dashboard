@@ -590,6 +590,18 @@ def cmd_hook(args):
 
 # --------------------------------------------------------------------------- virtual display
 
+def wait_port(port, timeout):
+    import socket
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        with socket.socket() as s:
+            s.settimeout(0.2)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                return True
+        time.sleep(0.1)
+    return False
+
+
 def set_output_mode(name, w, h, hz, scale):
     """Hyprland with a Lua config (0.5x+) rejects `keyword` and wants `eval`; older ones lack `eval`.
     Values are regex-validated digits, so the Lua string can't be injected into."""
@@ -598,10 +610,14 @@ def set_output_mode(name, w, h, hz, scale):
         out, code = run(["hyprctl", "keyword", "monitor", f"{name},{w}x{h}@{hz},auto,{scale}"])
         if code != 0 or "eval" in out:
             run(["hyprctl", "eval", lua])
-        time.sleep(SETTLE)
-        m = next((x for x in hypr_monitors() if x["name"] == name), None)
-        if m and (m["width"], m["height"]) == (int(w), int(h)):
-            return True
+        deadline = time.time() + SETTLE
+        while True:
+            m = next((x for x in hypr_monitors() if x["name"] == name), None)
+            if m and (m["width"], m["height"]) == (int(w), int(h)):
+                return True
+            if time.time() >= deadline:
+                break
+            time.sleep(0.1)
     return False
 
 
@@ -657,7 +673,7 @@ def cmd_virtual(args):
         if code != 0:
             print("hyprctl could not create a headless output (needs Hyprland >= 0.41)")
             return 1
-        time.sleep(2 * SETTLE)  # let hotplug-triggered `hyprctl reload`s pass before setting the mode
+        time.sleep(1.3 * SETTLE)  # hotplug scripts may `hyprctl reload` ~1 s after an output appears
     if not set_output_mode(VIRTUAL_NAME, w, h, hz, scale):
         print(f"warning: {VIRTUAL_NAME} did not take mode {w}x{h}; check `hyprctl monitors`")
     d.mkdir(parents=True, exist_ok=True)
@@ -685,6 +701,7 @@ def cmd_virtual(args):
     run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ monitor = "{VIRTUAL_NAME}" }}))'])
     run(["hyprctl", "eval", 'hl.dispatch(hl.dsp.focus({ workspace = "1", on_current_monitor = true }))'])
     _, code = run(["systemctl", "--user", "restart", "sunshine@virtual"], timeout=20)
+    wait_port(VIRTUAL_PORT, 8 * SETTLE)  # return as soon as Moonlight can connect
     print(f"virtual display {w}x{h}@{hz} scale {scale} on port {VIRTUAL_PORT}"
           f" ({'running' if code == 0 else 'failed to start sunshine@virtual'})")
     print(f"Move a workspace onto it: hyprctl dispatch moveworkspacetomonitor <n> {VIRTUAL_NAME}")
