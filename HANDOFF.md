@@ -64,9 +64,35 @@ multi configs, stream switching and auth all passed. Nothing has run on real har
 
 Report results honestly: say what was verified on hardware and what wasn't.
 
-## Not built yet: Omarchy (Linux) MacBook -> Omarchy PC
+## Omarchy (Linux) MacBook -> Omarchy PC: what is actually needed
 
-Asked for 2026-10-14, parked before any code was written. Nothing was changed on the laptop.
+The Linux client is moonlight-qt, already installed on both machines (6.1.0-7 on the PC,
+/usr/bin/moonlight on the laptop), so nothing has to be built to watch the stream. What is
+missing is pairing, and a small launcher.
+
+Pairing, as tried on 2026-10-14:
+- The project's own instances (~/.config/sunshine/instances: DP-1 48189, DP-3 48089,
+  HDMI-A-2 48289, virtual 48989) each carry generated web credentials (user "omarchy",
+  password in the instance's `webcreds`), so their PINs can be submitted with no password
+  from the user: POST /api/pair/<port>/<pin>.
+- The main unit (apollo, 47989) has NO web credentials set at all: sunshine_state.json has no
+  username, and /api/pin answers 401 for everything. Its only paired client is "Mac". Pairing
+  the laptop to the main stream therefore means either the Sunshine web UI first-run, or
+  `sunshine <conf> --creds omarchy <pw>` on the main config (nothing to overwrite) plus
+  teaching /api/pair about the main unit's port.
+- `moonlight pair <ip>:<port> --pin <pin>` on moonlight-qt 6.1.0 never sends the request: it
+  loops on 'Found unexpected PC "platanvejomarchy-DP-1" looking for "platanvejomarchy-DP-1"'.
+  So the scripted pairing path that works from macOS does not work from this Linux Moonlight;
+  pairing has to start in Moonlight's GUI on the laptop (Add PC), and the PIN it shows can then
+  be submitted from the laptop itself:
+    curl -X POST -H "Authorization: Bearer <token>" http://100.83.83.58:8110/api/pair/48189/<pin>
+- The laptop is on the same LAN as the PC (its Moonlight discovered platanvejomarchy at
+  192.168.50.227 over mDNS), so quality should be good; Tailscale is the fallback path.
+
+Still to build, small: `linux/omarchy-connect` for the laptop. Everything it needs already
+exists on the dashboard side, so it is a short script, not a port of the Mac client.
+
+Nothing on the laptop was changed. Sketch below.
 
 The client is macOS-only (pbpaste, osascript, system_profiler, networksetup, AWDL), so the
 Linux laptop needs a sibling script, not a tweak. What the laptop already has
