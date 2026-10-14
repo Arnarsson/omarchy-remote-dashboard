@@ -140,3 +140,9 @@ virtual opens on workspace 1, and the app self-updates omarchy-connect from GET 
 Verified live: the 6 binds appear/disappear in `hyprctl binds`. `hl.dispatch(hl.dsp.focus({workspace, on_current_monitor=true}))`
 brought ws 9 to the focused monitor. Not verified: /api/apps/close ending a live session.
 Lock after disconnect: LockedHint stays "no" even though omarchy-system-lock ran? Unknown, so ask the user whether the desk was locked.
+
+## Lock verified on hardware (from the 10:52 disconnect)
+omarchy-shell journal: 10:52:16.82 "lock-requested", 10:52:17.39 "secure=true" (locked); 10:52:23 PAM
+"Authenticated successfully", then "unlocked" (a password was typed at the desk). `omarchy-shell lock status` / `isLocked`
+can be queried. Race found: the hook ran while `virtual off` was already stopping sunshine@virtual (it won by 1.7 s).
+`virtual off` now waits for session.json to disappear (the hook finished) before stopping the instance.

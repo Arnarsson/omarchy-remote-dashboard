@@ -609,6 +609,11 @@ def cmd_virtual(args):
     d = INSTANCES_DIR / "virtual"
     ensure_hypr_env()
     if args.spec == "off":
+        # Sunshine runs the disconnect hook a few seconds after the client leaves; stopping the
+        # instance first would kill it mid-way (VRR/keys not restored, no lock). Wait for it.
+        deadline = time.time() + 10 * SETTLE
+        while SESSION_FILE.exists() and time.time() < deadline:
+            time.sleep(0.25)
         run(["systemctl", "--user", "stop", "sunshine@virtual"], timeout=20)
         run(["hyprctl", "output", "remove", VIRTUAL_NAME])
         print("virtual display removed")

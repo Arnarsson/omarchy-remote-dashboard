@@ -171,7 +171,10 @@ check "multi ignores the virtual output"  '[ ! -d "$I/OS-VIRTUAL" ]'
 check "multi instances get web logins"    '[ -f "$I/DP-2/webcreds" ] && [ -f "$I/HDMI-A-2/webcreds" ]'
 check "multi up skips virtual instance"   '! grep -q "start sunshine@virtual" "$LOG" && grep -q "start sunshine@DP-2" "$LOG"'
 check "bad virtual spec rejected"         '! "$CLI" virtual 12x >/dev/null'
-"$CLI" virtual off >/dev/null
+echo '{}' > "$HOME/.config/omarchy-stream/session.json"
+( sleep 0.6; rm -f "$HOME/.config/omarchy-stream/session.json" ) &
+t0=$(date +%s%N); OMARCHY_SETTLE=1 "$CLI" virtual off >/dev/null; t1=$(date +%s%N)
+check "virtual off waits for the hook"    '[ $(( (t1 - t0) / 1000000 )) -ge 500 ]'
 check "virtual off removes output"        'grep -q "hyprctl output remove OS-VIRTUAL" "$LOG"'
 
 # --------------------------------------------------------------------------- dashboard API
