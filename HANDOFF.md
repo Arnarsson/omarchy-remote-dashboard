@@ -1,4 +1,4 @@
-# omarchy-stream: handoff for Claude Code on the Omarchy host
+# omarchy-stream: handoff notes for the Omarchy host
 
 You are running on the real Omarchy (Arch + Hyprland 0.56, Wayland) host `platanvejomarchy`
 with an RTX 3070 and three monitors, left to right: DP-3 1920x1080@144, DP-1 3440x1440@100,
