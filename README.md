@@ -51,7 +51,8 @@ touches. `doctor` checks capture, encoder, input, routing, the Tailscale path an
 you). Opt in with `lock_on_disconnect`.
 
 **A way back in.** *Fix connection* in the menu restarts the PC's streaming: first through the
-dashboard, and if that is dead, over a shell on the PC (Tailscale SSH needs no key). `doctor`
+dashboard, and if that is dead, over SSH (on a tailnet with Tailscale SSH on, that needs no key
+and no password). `doctor`
 checks every route back to the PC: sshd, Tailscale SSH, lingering user services, sleep being
 masked, both services starting at boot, and whether a reboot would leave the PC at a login
 prompt with no desktop to stream.
@@ -130,7 +131,7 @@ Logs: PC `~/.config/omarchy-stream/{client-report,clipboard}.log`; Mac `~/Librar
 
 ## Tests
 
-`tests/run.sh` runs 192 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
+`tests/run.sh` runs 195 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
 macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API, Mac client and app.
 
 ## Known limits
@@ -142,7 +143,10 @@ macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API,
 - Nothing can start a desktop remotely: if the PC reboots with no TTY autologin, it waits at a
   login prompt and there is nothing to stream. `doctor` warns about it; turning autologin on means
   anyone sitting at the PC has your desktop, so it is your call, not the installer's.
-- Dictation from the Mac's microphone needs a recorder there (`brew install sox`, or ffmpeg) and
-  macOS Microphone permission for Omarchy Remote the first time. The PC's own microphone needs neither.
+- Dictation from the Mac's microphone needs ffmpeg or sox on the Mac (`brew install sox` if neither
+  is there) and macOS Microphone permission for Omarchy Remote, which only a human can grant: the
+  first hold of Option+X raises the prompt. A denied microphone returns silence rather than an
+  error, so the Mac checks the recording for signal and says what to allow instead of sending it.
+  The PC's own microphone needs none of this.
 
 See [KEYBOARD-SHORTCUTS.md](KEYBOARD-SHORTCUTS.md) for more Moonlight and Hyprland shortcuts.

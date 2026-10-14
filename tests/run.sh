@@ -25,7 +25,10 @@ stub voxtype   'echo "voxtype $*" >> "$LOG"
 [ "$1" = transcribe ] && echo "Transcription completed in 0.42s: \"hello from the mac\"" >&2
 exit 0'
 stub wtype     'echo "wtype $*" >> "$LOG"'
-stub ffmpeg    'echo "FFMPEG $*" >> "$LOG"; for a in "$@"; do last=$a; done; printf "RIFFfake" > "$last"; exec sleep 5'
+stub ffmpeg    'echo "FFMPEG $*" >> "$LOG"; for a in "$@"; do last=$a; done
+[ -n "${REC_SILENT:-}" ] && { printf "RIFF" > "$last"; dd if=/dev/zero bs=1024 count=8 >> "$last" 2>/dev/null; } \
+  || { printf "RIFF" > "$last"; head -c 2048 /dev/urandom | tr -d "\000" >> "$last"; }
+exec sleep 5'
 stub sox       'echo "SOX $*" >> "$LOG"; for a in "$@"; do last=$a; done; printf "RIFFfake" > "$last"; exec sleep 9'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
 stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
@@ -85,6 +88,7 @@ stub system_profiler 'printf "Graphics/Displays:\n    Displays:\n        Color L
 # refuse to run once these tests move HOME, and the suite must not depend on the host's setup.
 export PATH=$STUBS:/usr/bin:/bin:$PATH MOONLIGHT=$STUBS/moonlight LAUNCH_DELAY=0
 export HYPRLAND_INSTANCE_SIGNATURE=test XDG_SESSION_TYPE=wayland DRM_SYSFS=$WORK/nodrm OMARCHY_SETTLE=0
+export AUTOLOGIN_DIR=$WORK/noautologin   # doctor must not read this machine's real /etc
 
 new_home() { HOME=$(mktemp -d -p "$WORK"); export HOME; mkdir -p "$HOME/.config/sunshine" "$HOME/.config/hypr"; }
 
@@ -132,6 +136,8 @@ check "sees session hooks"                'grep -q "session-hooks.*VRR off" <<<"
 check "--json is valid JSON"              '{ "$CLI" doctor --json; true; } | python3 -c "import json,sys; json.load(sys.stdin)"'
 check "checks every way back in"          'for c in ssh tailscale-ssh linger stays-awake autologin "boots:omarchy-stream-dashboard"; do grep -q "$c" <<<"$out" || exit 1; done'
 check "warns when nothing logs TTY1 in"   'grep -q "autologin.*waits at a login prompt" <<<"$out"'
+mkdir -p "$WORK/autologin"; printf '[Service]\nExecStart=-/usr/bin/agetty --autologin sven - $TERM\n' > "$WORK/autologin/a.conf"
+check "sees autologin when it is set"     '{ AUTOLOGIN_DIR=$WORK/autologin "$CLI" doctor || true; } > "$WORK/al.out"; grep -q "autologin.*logs in as sven" "$WORK/al.out"'
 : > "$LOG"; rescue_out=$("$CLI" rescue 2>&1)
 check "rescue restarts both services"     'grep -q "systemctl --user restart sunshine" "$LOG" && grep -q "systemctl --user restart omarchy-stream-dashboard" "$LOG"'
 check "rescue reports the session"        'grep -qE "hyprland: (up|DOWN)" <<<"$rescue_out"'
@@ -421,13 +427,18 @@ rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; CLIPBOARD=0 "$MC"
 check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'
 # Fix connection: dashboard first, then a shell over Tailscale SSH, then plain ssh.
-stub ssh 'echo "SSH $*" >> "$LOG"; [ -f "$STATE/sshfail" ] && exit 255; echo "dashboard: active"; echo "sunshine: active"; echo "hyprland: up"'
+stub ssh 'echo "SSH $*" >> "$LOG"; [ -f "$STATE/sshfail" ] && exit 255
+[ -n "${SSH_LIES:-}" ] && { echo "usage: ssh ..."; exit 0; }
+echo "dashboard: active"; echo "sunshine: active"; echo "hyprland: up"'
 : > "$LOG"; out=$("$MC" rescue 2>&1)
 check "fix: dashboard does it alone"      'grep -q "fixed: Sunshine restarted" <<<"$out" && grep -q "CURL .*-X POST .*api/rescue" "$LOG" && ! grep -q "^SSH" "$LOG"'
 touch "$STATE/rescuefail"; : > "$LOG"; out=$("$MC" rescue 2>&1)
-check "fix: falls back to Tailscale SSH"  'grep -q "fixed over tailscale ssh" <<<"$out" && grep -q "TSSSH .*$(id -un)@omarchy .*omarchy-stream rescue" "$LOG" && grep -q "hyprland: up" <<<"$out"'
+check "fix: falls back to SSH"            'grep -q "fixed over ssh" <<<"$out" && grep -q "SSH .*$(id -un)@omarchy .*omarchy-stream rescue" "$LOG" && grep -q "hyprland: up" <<<"$out"'
 touch "$STATE/sshfail"; : > "$LOG"; out=$("$MC" rescue 2>&1) || true
-check "fix: says when the PC is gone"     'grep -q "could not reach the PC" <<<"$out" && grep -q "^TSSSH" "$LOG" && grep -q "^SSH" "$LOG"'
+check "fix: says when the PC is gone"     'grep -q "could not reach the PC" <<<"$out" && grep -q "^SSH" "$LOG"'
+rm -f "$STATE/sshfail"; touch "$STATE/rescuefail"; : > "$LOG"; out=$(SSH_LIES=1 "$MC" rescue 2>&1) || true
+check "fix: ssh exit 0 is not proof"      'grep -q "could not reach the PC" <<<"$out"'
+touch "$STATE/rescuefail" "$STATE/sshfail"
 check "fix: a dead PC exits non-zero"     '! "$MC" rescue >/dev/null 2>&1'
 rm -f "$STATE/rescuefail" "$STATE/sshfail"
 # Dictation with the Mac's mic: the PC flips a flag, the Mac records and posts the audio back.
@@ -435,7 +446,9 @@ CE=$HOME/.config/omarchy-stream/client.env
 echo "DICTATE_MIC=mac" >> "$CE"; : > "$LOG"; DL=$WORK/dict.log
 DICTLOG=$DL CLIPBOARD=0 ML_HOOK="sleep 1.2" "$MC" all >/dev/null
 check "mic: records when Option+X goes down" 'grep -q "recording" "$DL" && grep -q "FFMPEG .*-f avfoundation .*-ar 16000 -ac 1" "$LOG"'
-check "mic: audio posted to the PC"       'grep -q "sent 8 bytes -> .*hello from the mac" "$DL" && grep -q "CURL .*-X POST .*audio/wav.*api/dictate" "$LOG"'
+check "mic: audio posted to the PC"       'grep -q "sent [0-9]* bytes -> .*hello from the mac" "$DL" && grep -q "CURL .*-X POST .*audio/wav.*api/dictate" "$LOG"'
+: > "$LOG"; : > "$DL"; REC_SILENT=1 OMARCHY_GUI=1 DICTLOG=$DL CLIPBOARD=0 ML_HOOK="sleep 1.2" "$MC" all >/dev/null
+check "mic: silence means no permission"  'grep -q "silence: macOS has not allowed the microphone" "$DL" && ! grep -q "audio/wav" "$LOG" && grep -q "OSA .*Microphone blocked" "$LOG"'
 check "mic: stops with the session"       'sleep 0.3; ! pgrep -f "api/dictate?have" >/dev/null'
 sed -i 's/^DICTATE_MIC=.*/DICTATE_MIC=host/' "$CE"; : > "$LOG"; : > "$DL"
 CLIPBOARD=0 ML_HOOK="sleep 0.4" "$MC" all >/dev/null

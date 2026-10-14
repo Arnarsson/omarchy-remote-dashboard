@@ -258,3 +258,36 @@ Two bugs the stubs caught, both real:
 Not verified on hardware: speech -> text -> wtype (no TTS here to synthesise speech, and typing
 into the live session is intrusive), and the entire Mac half (recorder, mic permission, upload).
 Needs `brew install sox` (or ffmpeg) on the Mac, and macOS will ask for Microphone permission.
+
+## 2026-10-14 (night) — the Mac half, verified on the Mac
+
+The MacBook Air has Remote Login on, so the Mac side could finally be driven from the PC
+(ssh sven@100.87.86.22, key auth, macOS 26.2). ffmpeg and sox were already installed there,
+so the "brew install sox" step was never needed. client.env predated the new keys and got
+HOST_USER=sven and DICTATE_MIC=host; the app's bundled client and launcher were refreshed
+from /mac/* on the PC.
+
+Verified Mac -> PC, for real:
+- "Fix connection", rung 1: `omarchy-connect rescue` -> "fixed: Sunshine restarted (dashboard
+  answered)".
+- rung 2: with DASHBOARD_PORT bent to 1, -> "dashboard did not answer, going in over SSH ...
+  fixed over ssh: dashboard: active / apollo: active / hyprland: up". Config restored after.
+- Dictation choreography, both machines live: the Mac's held-open poll returned "rec" when
+  `dictate start` ran on the PC, it started ffmpeg, the next poll returned "idle" on release,
+  it stopped the recorder and correctly declined to upload.
+
+Three real bugs this access exposed, all fixed:
+- `tailscale ssh` does not exist in the Mac's Tailscale build: it printed help and exited 0,
+  which the rescue read as success. Plain ssh is enough (tailscaled answers port 22 on the
+  tailnet), and success is now proven by rescue's own "hyprland:" line, not by ssh's exit code.
+- the bare `ssh_out=$(ssh ...)` assignment killed the client through set -e on a failed ssh,
+  so it never printed "could not reach the PC".
+- a microphone macOS has not granted returns SILENCE, not an error: 26328 bytes at amplitude
+  0.000000. The Mac now checks for non-zero PCM and names the System Settings panel to allow,
+  instead of uploading silence and reporting "nothing recognised".
+
+Doctor's autologin check reads AUTOLOGIN_DIR when set, so the suite stops depending on this
+machine's /etc (it went green here once autologin was actually enabled).
+
+Still needs a human, once: the macOS Microphone prompt on the first hold of Option+X, and
+with it the proof that real speech comes out as typed text.

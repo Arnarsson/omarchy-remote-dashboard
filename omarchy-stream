@@ -297,7 +297,7 @@ def cmd_doctor_results():
     return results
 
 
-AUTOLOGIN_DROPIN = Path("/etc/systemd/system/getty@tty1.service.d")
+AUTOLOGIN_DROPIN = Path(os.environ.get("AUTOLOGIN_DIR", "/etc/systemd/system/getty@tty1.service.d"))
 
 
 def autologin_user():

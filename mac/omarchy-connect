@@ -220,13 +220,21 @@ mic_sync() {
         while kill -0 $rec_pid 2>/dev/null && (( i < 20 )); do sleep 0.1; i=$((i+1)); done
         kill -9 $rec_pid 2>/dev/null; wait $rec_pid 2>/dev/null; rec_pid=""
       fi
-      if [[ -s $wav ]]; then
+      # A microphone macOS has not granted returns silence, not an error, so check for signal:
+      # all-zero PCM leaves only the WAV header's own non-zero bytes.
+      local bytes=0 signal=0
+      [[ -s $wav ]] && bytes=$(wc -c < "$wav" | tr -d ' ')
+      (( bytes > 0 )) && signal=$(LC_ALL=C tr -d '\000' < "$wav" | wc -c | tr -d ' ')
+      if (( bytes > 0 && signal > 500 )); then
         local said
         said=$(curl -fsS -m 60 -X POST -H "$auth" -H "Content-Type: audio/wav" --data-binary @"$wav" "$url" 2>/dev/null)
-        dlog "sent $(wc -c < "$wav" | tr -d ' ') bytes -> ${said:-no answer}"
+        dlog "sent $bytes bytes -> ${said:-no answer}"
+      elif (( bytes > 0 )); then
+        dlog "recorded $bytes bytes of silence: macOS has not allowed the microphone"
+        notify "Microphone blocked: System Settings > Privacy & Security > Microphone > Omarchy Remote"
       else
-        dlog "nothing recorded (microphone permission?)"
-        notify "Nothing recorded: check Microphone permission for Omarchy Remote"
+        dlog "nothing recorded at all (is ${cmd%% *} working?)"
+        notify "Nothing recorded. Check the microphone in System Settings."
       fi
     fi
   done
@@ -293,21 +301,19 @@ rescue() {
     notify "Sunshine restarted"; return 0
   fi
   echo "dashboard did not answer, going in over SSH ..."
+  # Plain ssh, not `tailscale ssh`: on the tailnet tailscaled answers port 22 itself when
+  # Tailscale SSH is on, so this needs no key, and the Mac's Tailscale has no ssh subcommand
+  # anyway (it prints help and exits 0, which would look like success).
+  # ~/.local/bin is not on a non-interactive SSH session's PATH, hence the full path.
   local user=${HOST_USER:-$USER} ssh_out="" remote
-  # ~/.local/bin is not on PATH in a non-interactive SSH session, hence the full path.
   remote='command -v omarchy-stream >/dev/null && exec omarchy-stream rescue; exec ~/.local/share/omarchy-stream/omarchy-stream rescue'
-  for how in tailscale plain; do
-    local -a ssh_cmd=(ssh)
-    if [[ $how == tailscale ]]; then
-      [[ -x $TS ]] || continue          # Tailscale SSH needs no key, so it goes first
-      ssh_cmd=("$TS" ssh)
-    fi
-    if ssh_out=$("${ssh_cmd[@]}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
-                 "$user@$HOST" "$remote" 2>&1); then
-      echo "fixed over $how ssh:"; sed 's/^/  /' <<<"$ssh_out"
-      notify "Fixed over SSH"; return 0
-    fi
-  done
+  # || true: a failed ssh must print the message below, not kill the script through set -e.
+  ssh_out=$(ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 "$user@$HOST" "$remote" 2>&1) || true
+  # "hyprland:" is rescue's last line: proof the command really ran, not just that ssh exited 0.
+  if [[ $ssh_out == *"hyprland:"* ]]; then
+    echo "fixed over ssh:"; sed 's/^/  /' <<<"$ssh_out"
+    notify "Fixed over SSH"; return 0
+  fi
   echo "✘ could not reach the PC at $HOST"
   echo "  last error: $(tail -1 <<<"${ssh_out:-no output}")"
   echo "  the PC is off, off the tailnet, or waiting at a login prompt"
