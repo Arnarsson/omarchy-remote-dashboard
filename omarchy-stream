@@ -511,12 +511,20 @@ def stream_keys(on):
     """Bindings that only exist while a stream is up. Lua configs take `eval`; legacy ones `keyword`."""
     me = APP_DIR / "omarchy-stream"
     keys = STREAM_KEYS + [("CTRL + ALT + Q", f'hl.dsp.exec_cmd("{me} disconnect")', f"CTRL ALT,Q,exec,{me} disconnect")]
-    for lua_keys, lua_dsp, legacy in keys:
+    # Option+X: hold to dictate with voxtype, like the local Option+X (which is MOD5 there, plain Alt
+    # through Moonlight). The PC's microphone does the listening.
+    if shutil.which("voxtype"):
+        keys += [("ALT + X", 'hl.dsp.exec_cmd("voxtype record start")', "ALT,X,exec,voxtype record start"),
+                 ("ALT + X", 'hl.dsp.exec_cmd("voxtype record stop")', "ALT,X,exec,voxtype record stop", "release")]
+    for lua_keys, lua_dsp, legacy, *release in keys:
         if on:
-            out, code = run(["hyprctl", "eval", f'hl.bind("{lua_keys}", {lua_dsp}, {{ description = "omarchy-stream" }})'])
+            opts = "description = \"omarchy-stream\"" + (", release = true" if release else "")
+            out, code = run(["hyprctl", "eval", f'hl.bind("{lua_keys}", {lua_dsp}, {{ {opts} }})'])
             if code != 0 or out.strip() != "ok":
-                run(["hyprctl", "keyword", "bind", legacy])
+                run(["hyprctl", "keyword", "bindr" if release else "bind", legacy])
         else:
+            if release:
+                continue  # the press entry's unbind removes both
             out, code = run(["hyprctl", "eval", f'hl.unbind("{lua_keys}")'])
             if code != 0 or out.strip() != "ok":
                 run(["hyprctl", "keyword", "unbind", ",".join(legacy.split(",")[:2])])

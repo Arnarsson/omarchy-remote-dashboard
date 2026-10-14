@@ -21,6 +21,7 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 [ "$2" = show ] && echo "${MAINPID:-0}"; exit 0'
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
 stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
+stub voxtype   'echo "voxtype $*" >> "$LOG"'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
 stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
   echo "64 bytes from 100.73.206.17: icmp_seq=$i ttl=64 time=$r ms"; i=$((i+1)); done'
@@ -143,10 +144,12 @@ check "cursor hidden by user stays hidden" '[ "$(cat "$STATE/cursor")" = true ]'
 echo '{}' > "$HOME/.config/omarchy-stream/config.json"
 : > "$LOG"; "$CLI" hook connect
 check "connect adds stream keys"          'grep -q "hyprctl eval hl.bind(\"CTRL + ALT + 1\", hl.dsp.focus({ workspace = \"1\", on_current_monitor = true })" "$LOG" && grep -q "hl.bind(\"CTRL + ALT + Q\", hl.dsp.exec_cmd(\".*omarchy-stream disconnect\")" "$LOG"'
-: > "$LOG"; "$CLI" hook disconnect
+: > "$LOG.connect"; cp "$LOG" "$LOG.connect"; : > "$LOG"; "$CLI" hook disconnect
 check "disconnect removes stream keys"    '[ "$(grep -c "hl.unbind(\"CTRL + ALT" "$LOG")" = 6 ]'
+check "connect adds Option+X dictation"   'grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\"voxtype record stop\"), { description = \"omarchy-stream\", release = true })" "$LOG.connect" && grep -q "hl.bind(\"ALT + X\", hl.dsp.exec_cmd(\"voxtype record start\"), { description = \"omarchy-stream\" })" "$LOG.connect"'
+check "disconnect removes Option+X"       'grep -q "hl.unbind(\"ALT + X\")" "$LOG"'
 : > "$LOG"; LEGACY=1 "$CLI" hook connect; LEGACY=1 "$CLI" hook disconnect
-check "legacy Hyprland: keyword binds"    'grep -q "hyprctl keyword bind CTRL ALT,3,focusworkspaceoncurrentmonitor,3" "$LOG" && grep -q "hyprctl keyword unbind CTRL ALT,Q" "$LOG"'
+check "legacy Hyprland: keyword binds"    'grep -q "hyprctl keyword bind CTRL ALT,3,focusworkspaceoncurrentmonitor,3" "$LOG" && grep -q "hyprctl keyword unbind CTRL ALT,Q" "$LOG" && grep -q "hyprctl keyword bindr ALT,X,exec,voxtype record stop" "$LOG"'
 echo 2 > "$STATE/vrr"; LUA=1 "$CLI" hook connect
 check "Lua Hyprland: VRR off via eval"    '[ "$(cat "$STATE/vrr")" = 0 ]'
 LUA=1 "$CLI" hook disconnect

@@ -28,7 +28,8 @@ your Mac clipboard. Toggle it in the menu (on by default).
 office). With PC speakers, Sunshine's copy is muted so you don't hear it twice.
 
 **Stream keys.** While streaming: Ctrl+Option+1…5 brings a workspace to the screen you're
-watching, Ctrl+Option+Q disconnects. They exist only during a session.
+watching, Ctrl+Option+Q disconnects, and holding Option+X dictates (voxtype, PC microphone).
+They exist only during a session.
 
 **Smarter connection.** It measures the path before connecting (direct vs relayed, latency
 spikes, loss) and picks the bitrate, capped at 25 Mbps on Wi-Fi. AirDrop (AWDL), a common cause
@@ -61,6 +62,7 @@ launch timing, Moonlight's log and the clipboard log to the PC, so problems can 
 |---|---|
 | Ctrl+Option+1 … 5 | Bring that workspace to the screen you're watching |
 | Ctrl+Option+Q | Disconnect |
+| Option+X (hold) | Dictate with voxtype on the PC (uses the PC's microphone) |
 | Ctrl+Option+Shift+Z | Release the mouse to the Mac (Moonlight) |
 | Ctrl+Option+Shift+S | Stats overlay (Moonlight) |
 
@@ -111,7 +113,7 @@ Logs: PC `~/.config/omarchy-stream/{client-report,clipboard}.log`; Mac `~/Librar
 
 ## Tests
 
-`tests/run.sh` runs 161 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
+`tests/run.sh` runs 163 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
 macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API, Mac client and app.
 
 ## Known limits
