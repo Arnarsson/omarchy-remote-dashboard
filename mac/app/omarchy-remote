@@ -9,6 +9,7 @@ HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
 APPLOG="$HOME/Library/Logs/omarchy-remote.log"
 mkdir -p "$(dirname "$APPLOG")"
 
+export OMARCHY_T_UPDATE=$(date +%s)
 # Self-update: take the newest client from the host (fixes land without rerunning setup).
 conf="$HOME/.config/omarchy-stream/client.env"
 if [[ -f $conf ]]; then
@@ -22,6 +23,7 @@ if [[ -f $conf ]]; then
   rm -f "$new"
 fi
 
+export OMARCHY_T_MENU=$(date +%s)
 V="Screen sized to this Mac"; M="Main monitor (ultrawide)"; A="All three monitors"; C="Check connection"
 while true; do
   # Settings toggles live in the same list; picking one flips it and shows the list again.
@@ -45,6 +47,7 @@ while true; do
   esac
 done
 
+export OMARCHY_T_CHOSEN=$(date +%s)   # so the report separates "time in the menu" from launch work
 echo "=== $(date) $mode" >> "$APPLOG"
 tmp=$(mktemp)
 "$HERE/omarchy-connect" "$mode" > "$tmp" 2>&1; rc=$?

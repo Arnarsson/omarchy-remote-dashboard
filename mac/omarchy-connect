@@ -108,6 +108,8 @@ report() {
 # Seconds since the app was clicked, per step (sent in the report).
 T0=${OMARCHY_T0:-$(date +%s)}; TIMES=
 stamp() { TIMES+="$1=$(( $(date +%s) - T0 ))s "; }
+[[ -n ${OMARCHY_T_MENU:-} ]] && TIMES+="menu_shown=$(( OMARCHY_T_MENU - T0 ))s "
+[[ -n ${OMARCHY_T_CHOSEN:-} ]] && TIMES+="chosen=$(( OMARCHY_T_CHOSEN - T0 ))s "
 
 # The app's launcher updates through here too: swap it atomically (bash keeps the old inode).
 update_launcher() {

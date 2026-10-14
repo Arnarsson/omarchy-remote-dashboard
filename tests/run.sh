@@ -380,7 +380,7 @@ echo "# local edit" >> "$L2"
 check "app: self-updates its client"      'cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && grep -q "CURL .*/mac/omarchy-connect" "$LOG"'
 check "app: self-updates its launcher"    'cmp -s "$L2" "$ROOT/mac/app/omarchy-remote"'
 check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
-check "app: report carries step timing"  'grep -q "timing: start=.*measured=.*screen_ready=.*moonlight=" "$LOG"'
+check "app: report carries step timing"  'grep -q "timing: menu_shown=.*chosen=.*start=.*measured=.*screen_ready=.*moonlight=" "$LOG"'
 check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 echo "old" > "$STATE/macclip"; : > "$LOG"
