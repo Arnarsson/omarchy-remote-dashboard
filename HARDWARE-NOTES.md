@@ -200,3 +200,4 @@ instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timin
 - Timing: start=16s measured=18s screen_ready=21s moonlight=21s; Moonlight connected about 6 s later (was 29 s).
   16 s before measuring = two dialogs + updates, so the sound choice moved into the menu (OMARCHY_MENU_AUDIO).
 - Moonlight logs to /tmp/Moonlight-*.log ("Redirecting log output to ..."); send_log now tails that file.
+- 12:41 session: user confirms clipboard works for text and images. Screen 2560x1664@1, Sunshine capture muted with host audio, Moonlight connected 2 s after launch. click->measure was 43 s (menu time vs update unknown; now reported as menu_shown/chosen).

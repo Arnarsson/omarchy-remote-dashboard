@@ -204,7 +204,8 @@ clip_sync() {
   while sleep 0.6; do
     n=$((n+1))
     code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$(cat "$dir/last" 2>/dev/null)" 2>/dev/null)
-    if [[ $code == 200 && -s $dir/in ]]; then
+    # Re-check against "last" now: a push from the watcher may have landed while this request was in flight.
+    if [[ $code == 200 && -s $dir/in && $(sha "$dir/in") != "$(cat "$dir/last" 2>/dev/null)" ]]; then
       sha "$dir/in" > "$dir/last"; clog "Linux->Mac $(grep -i '^content-type' "$dir/hdr" | tr -d '\r' | cut -d' ' -f2) $(wc -c < "$dir/in" | tr -d ' ') bytes"
       if grep -qi '^content-type: image/png' "$dir/hdr"; then
         osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
