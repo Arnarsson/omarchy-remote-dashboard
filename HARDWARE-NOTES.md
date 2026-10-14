@@ -173,3 +173,13 @@ instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timin
 - Bug caught by tests: under set -e, `kill $clip` on an exited loop aborted before AirDrop was restored.
 - Known race: Raycast "Paste" copies then sends Cmd+V at once; the sync can lag by up to 0.15 s, so the first paste may be the
   previous item. Unverified on the Mac (osascript image paths, xxd).
+
+## Session 5 (11:44): "still a little slow, and what happened to the screen?" (screenshot: huge 16:9 UI)
+- OS-VIRTUAL was 1920x1080 scale 2 (logical 960x540). Event trace: any mode change triggers a `configreloaded` about 1 s later
+  (omarchy-hyprland-monitor-watch and monitor-reload-on-hotplug.sh), which drops runtime `eval` monitor rules, so the mode can never stick at runtime.
+  FIX: install.sh appends a guarded dofile of ~/.config/hypr/omarchy-stream.lua to hyprland.lua (backup kept); `virtual`
+  writes the size rule there and runs `hyprctl reload` before creating the output. Verified live twice: 2560x1664@1
+  held for 6 s through reloads, create about 2.0 s, off about 1.6 s, layout restored exactly, no configerrors.
+- Restore ran before workspaces migrated (DP-1 was left on an empty ws 5). Now it waits for configreloaded and re-checks up to 3 times.
+- Mac timing report: start=2s measured=10s screen_ready=14s moonlight=16s, and Moonlight connected at +45 s (Sunshine ready at +10 s).
+  The measure was slow because of the Mac Tailscale CLI, so the host now answers /api/path. Moonlight's ~29 s is unexplained; the app now sends Moonlight's log after each session.

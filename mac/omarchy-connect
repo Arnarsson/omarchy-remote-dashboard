@@ -39,10 +39,19 @@ TS=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tai
 # Measure the path: direct vs relayed, median RTT, loss. Sets BITRATE (kbps) and prints why.
 measure() {
   local out pings n_ok rtts median relayed=no factor=100
-  # One Tailscale ping tells direct vs relayed; ten plain pings 0.1 s apart give RTT, spikes and loss (~1 s).
-  out=$("$TS" ping -c 1 --until-direct=false "$HOST" 2>&1 || true)
-  grep -q 'via DERP' <<<"$out" && relayed=yes
+  # The host says direct vs relayed (its Tailscale status, instant); meanwhile ten pings 0.1 s apart
+  # give RTT, spikes and loss. The Mac's Tailscale CLI is only the fallback (it takes seconds to start).
+  local pathf; pathf=$(mktemp)
+  [[ -n ${TOKEN:-} ]] && curl -fsS -m 2 -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/path" -o "$pathf" 2>/dev/null &
   pings=$(ping -c 10 -i 0.1 -t 3 "$HOST" 2>&1 || true)
+  wait 2>/dev/null || true
+  if grep -q '"known": true' "$pathf" 2>/dev/null; then
+    grep -q '"direct": false' "$pathf" && relayed=yes
+  else
+    out=$("$TS" ping -c 1 --until-direct=false "$HOST" 2>&1 || true)
+    grep -q 'via DERP' <<<"$out" && relayed=yes
+  fi
+  rm -f "$pathf"
   n_ok=$(grep -c 'bytes from' <<<"$pings" || true)
   rtts=$(grep -o 'time=[0-9.]*' <<<"$pings" | cut -d= -f2 | sort -n || true)
   if [[ $n_ok -eq 0 ]]; then
@@ -112,6 +121,15 @@ update_launcher() {
     chmod +x "$new" && mv -f "$new" "$launcher"
   fi
   rm -f "$new"
+}
+
+# After a session: Moonlight's own log (connect timing, decoder, errors) to the host, in the background.
+send_log() {
+  [[ -n ${TOKEN:-} && -s $2 ]] || { rm -f "$2"; return 0; }
+  { echo "mode=$1 moonlight log (started at +${TIMES##*moonlight=}):"; tail -120 "$2"; } \
+    | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
+      "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
+  rm -f "$2"
 }
 
 # Notification when run from Omarchy Remote.app (no terminal to print to).
@@ -241,7 +259,9 @@ case "${1:-all}" in
     wifi_quiet; stamp moonlight; report all &
     clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
-    "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
+    mllog=$(mktemp)
+    "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    send_log all "$mllog"
     kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
   virtual)
     need_token
@@ -257,7 +277,9 @@ case "${1:-all}" in
     wifi_quiet; stamp moonlight; report virtual &
     clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
-    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
+    mllog=$(mktemp)
+    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    send_log virtual "$mllog"
     kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
     echo "Virtual display removed." ;;

@@ -591,6 +591,52 @@ def cmd_hook(args):
 
 # --------------------------------------------------------------------------- virtual display
 
+HYPR_RULE_LUA = HOME / ".config/hypr/omarchy-stream.lua"
+HYPR_RULE_CONF = HOME / ".config/hypr/omarchy-stream.conf"
+
+
+def write_virtual_rule(w, h, hz, scale):
+    HYPR_RULE_LUA.parent.mkdir(parents=True, exist_ok=True)
+    HYPR_RULE_LUA.write_text("-- written by omarchy-stream (virtual display size)\n"
+                             f'hl.monitor({{ output = "{VIRTUAL_NAME}", mode = "{w}x{h}@{hz}", position = "auto", scale = {scale} }})\n')
+    HYPR_RULE_CONF.write_text(f"# written by omarchy-stream (virtual display size)\nmonitor = {VIRTUAL_NAME},{w}x{h}@{hz},auto,{scale}\n")
+
+
+def hypr_events():
+    """Connect to Hyprland's event socket now, so events that follow aren't missed."""
+    import socket
+    sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+    path = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hypr" / sig / ".socket2.sock"
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.connect(str(path))
+        return s
+    except OSError:
+        return None
+
+
+def wait_event(sock, name, timeout):
+    if sock is None:
+        time.sleep(timeout)
+        return False
+    deadline, buf = time.time() + timeout, b""
+    try:
+        while time.time() < deadline:
+            sock.settimeout(max(0.05, deadline - time.time()))
+            try:
+                chunk = sock.recv(65536)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+            if any(line.startswith(name.encode()) for line in buf.split(b"\n")):
+                return True
+        return False
+    finally:
+        sock.close()
+
+
 def wait_port(port, timeout):
     import socket
     deadline = time.time() + timeout
@@ -640,10 +686,15 @@ def restore_layout():
         layout = json.loads(LAYOUT_FILE.read_text())
     except (OSError, json.JSONDecodeError):
         return
-    for mon, ws in layout.items():
-        if ws and not ws.startswith("-"):
+    want = {mon: ws for mon, ws in layout.items() if ws and not ws.startswith("-")}
+    for _ in range(3):
+        for mon, ws in want.items():
             run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ monitor = "{mon}" }}))'])
             run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ workspace = "{ws}", on_current_monitor = true }}))'])
+        time.sleep(0.3 * SETTLE)
+        now = {m["name"]: str((m.get("activeWorkspace") or {}).get("id", "")) for m in hypr_monitors()}
+        if all(now.get(mon) == ws for mon, ws in want.items()):
+            break
     LAYOUT_FILE.unlink(missing_ok=True)
 
 
@@ -658,8 +709,9 @@ def cmd_virtual(args):
         while SESSION_FILE.exists() and time.time() < deadline:
             time.sleep(0.25)
         run(["systemctl", "--user", "stop", "sunshine@virtual"], timeout=20)
+        events = hypr_events()
         run(["hyprctl", "output", "remove", VIRTUAL_NAME])
-        time.sleep(2 * SETTLE)  # hotplug `hyprctl reload` first, then put workspaces back
+        wait_event(events, "configreloaded", 2.5 * SETTLE)  # workspaces migrate, watchers reload; then restore
         restore_layout()
         print("virtual display removed")
         return 0
@@ -668,15 +720,23 @@ def cmd_virtual(args):
         print("usage: omarchy-stream virtual WIDTHxHEIGHT[@HZ][,SCALE] | off   e.g. 3024x1964@60,2")
         return 2
     w, h, hz, scale = m.group(1), m.group(2), m.group(3) or "60", m.group(4) or "1"
+    # The size rule must live in the config: monitor watchers `hyprctl reload` on every change,
+    # which drops runtime rules. install.sh makes hyprland.lua/.conf include this file.
+    write_virtual_rule(w, h, hz, scale)
+    run(["hyprctl", "reload"])
     if not any(x["name"] == VIRTUAL_NAME for x in hypr_monitors()):
         save_layout()
+        events = hypr_events()
         _, code = run(["hyprctl", "output", "create", "headless", VIRTUAL_NAME])
         if code != 0:
             print("hyprctl could not create a headless output (needs Hyprland >= 0.41)")
             return 1
-        time.sleep(1.3 * SETTLE)  # hotplug scripts may `hyprctl reload` ~1 s after an output appears
+        # Hotplug scripts may `hyprctl reload` ~1 s after an output appears, which resets its mode.
+        wait_event(events, "configreloaded", 1.8 * SETTLE)
     if not set_output_mode(VIRTUAL_NAME, w, h, hz, scale):
         print(f"warning: {VIRTUAL_NAME} did not take mode {w}x{h}; check `hyprctl monitors`")
+    time.sleep(0.3 * SETTLE)  # a late reload would reset it; check once more
+    set_output_mode(VIRTUAL_NAME, w, h, hz, scale)
     d.mkdir(parents=True, exist_ok=True)
     base = {k: v for k, v in read_conf(SUNSHINE_CONF).items()
             if k not in WINDOWS_ONLY_KEYS and k != "minimum_fps_target"}
@@ -927,6 +987,11 @@ def make_handler(token):
                 return self.send(200, status())
             if self.path == "/api/doctor":
                 return self.send(200, cmd_doctor_results())
+            if self.path == "/api/path":  # direct or relayed, for the client asking (instant, no CLI on the Mac)
+                _, peers = tailscale_peers()
+                me = next((x for x in peers if x["ip"] == self.client_address[0]), None)
+                return self.send(200, {"known": bool(me), "direct": bool(me and me["direct"]),
+                                       "relay": me and me["relay"], "endpoint": me and me["endpoint"]})
             if self.path.startswith("/api/clipboard"):
                 from urllib.parse import parse_qs, urlparse
                 have = (parse_qs(urlparse(self.path).query).get("have") or [""])[0]

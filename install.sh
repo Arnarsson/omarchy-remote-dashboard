@@ -44,6 +44,7 @@ getcap "$SUNREAL" 2>/dev/null | grep -q cap_sys_admin \
   || echo "  4. sudo setcap cap_sys_admin+p $SUNREAL   (KMS capture)"
 echo "  5. register session hooks in sunshine.conf (VRR off and stream keys while streaming; optional lock on disconnect;"
 echo "     toggle in ~/.config/omarchy-stream/config.json). Skipped if you already have a global_prep_cmd."
+echo "  5b. add one line to hyprland.lua (backed up) so the virtual screen's size survives config reloads"
 echo "  6. enable the dashboard and stop running disable-wifi.sh if it is in Hyprland autostart (it is commented out, not deleted)"
 echo "  7. restart $SUNSHINE_UNIT.service so the new settings apply (drops any stream in progress)"
 if [[ ${1:-} == -y ]]; then echo "Proceeding (-y)."
@@ -97,6 +98,17 @@ json.dump(cfg, open(path, "w"), indent=2)
 PY
 
 getcap "$SUNREAL" 2>/dev/null | grep -q cap_sys_admin || sudo setcap cap_sys_admin+p "$SUNREAL"
+
+# Let the virtual display's size rule survive config reloads: include omarchy-stream's rule file.
+HL=~/.config/hypr/hyprland.lua; HC=~/.config/hypr/hyprland.conf
+if [[ -f $HL ]] && ! grep -q 'omarchy-stream.lua' "$HL"; then
+  cp -n "$HL" "$HL.bak.$ts"
+  printf '\n-- omarchy-stream: virtual display size (file exists only after first use)\ndo local f = os.getenv("HOME") .. "/.config/hypr/omarchy-stream.lua"; local h = io.open(f); if h then h:close(); dofile(f) end end\n' >> "$HL"
+elif [[ ! -f $HL && -f $HC ]] && ! grep -q 'omarchy-stream.conf' "$HC"; then
+  cp -n "$HC" "$HC.bak.$ts"
+  touch ~/.config/hypr/omarchy-stream.conf
+  printf '\n# omarchy-stream: virtual display size\nsource = ~/.config/hypr/omarchy-stream.conf\n' >> "$HC"
+fi
 
 AUTO=~/.config/hypr/autostart.conf
 if [[ -f $AUTO ]] && grep -qE '^[^#].*(disable-wifi|serve\.sh)' "$AUTO"; then

@@ -91,10 +91,14 @@ check "v1 autostart lines commented"      '[ "$(grep -c "^# disabled by omarchy-
 check "setcap requested once"             '[ "$(grep -c "sudo setcap" "$LOG")" = 1 ]'
 check "client config defaults written"    'grep -q lock_on_disconnect "$HOME/.config/omarchy-stream/config.json"'
 check "sunshine@ unit points at binary"   'grep -q "ExecStart=$STUBS/sunshine" "$HOME/.config/systemd/user/sunshine@.service"'
+check "no hyprland.lua: nothing touched"   '[ ! -f "$HOME/.config/hypr/hyprland.lua" ]'
 check "mac client shipped with the app"   '[ -x "$HOME/.local/share/omarchy-stream/mac/omarchy-connect" ]'
 H1=$HOME; new_home; : > "$LOG"
-"$ROOT/install.sh" -y </dev/null >/dev/null 2>&1
+printf 'require("hypr.monitors")\n' > "$HOME/.config/hypr/hyprland.lua"; cp "$HOME/.config/hypr/hyprland.lua" "$WORK/hl.orig"
+"$ROOT/install.sh" -y </dev/null >/dev/null 2>&1; "$ROOT/install.sh" -y </dev/null >/dev/null 2>&1
 check "install -y needs no input"         '[ -x "$HOME/.local/bin/omarchy-stream" ]'
+check "hyprland.lua includes rule once"   '[ "$(grep -c "omarchy-stream.lua" "$HOME/.config/hypr/hyprland.lua")" = 1 ] && [ "$(grep -c "dofile(f)" "$HOME/.config/hypr/hyprland.lua")" = 1 ] && cmp -s "$HOME"/.config/hypr/hyprland.lua.bak.* "$WORK/hl.orig"'
+check "hyprland.lua include is valid Lua" '! command -v luac >/dev/null || luac -p "$HOME/.config/hypr/hyprland.lua"'
 HOME=$H1
 CLI=$HOME/.local/bin/omarchy-stream
 
@@ -166,6 +170,8 @@ check "ports still left-to-right"         'grep -q "port = 48089" "$I/HDMI-A-2/s
 check "instances log at info, not verbose" 'grep -q "min_log_level = info" "$I/DP-2/sunshine.conf"'
 check "no fps floor in instances"         '! grep -rq minimum_fps_target "$I"'
 : > "$LOG"; out=$("$CLI" virtual 3024x1964@60,2)
+check "virtual size rule written to file" 'grep -q "hl.monitor({ output = \"OS-VIRTUAL\", mode = \"3024x1964@60\", position = \"auto\", scale = 2 })" "$HOME/.config/hypr/omarchy-stream.lua"'
+check "rule loaded before output exists"  '[ "$(grep -n "hyprctl reload" "$LOG" | head -1 | cut -d: -f1)" -lt "$(grep -n "hyprctl output create" "$LOG" | head -1 | cut -d: -f1)" ]'
 check "virtual creates headless output"   'grep -q "hyprctl output create headless OS-VIRTUAL" "$LOG"'
 check "virtual sets mode and scale"       'grep -q "OS-VIRTUAL,3024x1964@60,auto,2" "$LOG"'
 check "virtual instance logs at info"     'grep -q "min_log_level = info" "$I/virtual/sunshine.conf"'
@@ -224,6 +230,7 @@ printf "\x89PNG\r\n\x1a\nfakeimage" > "$WORK/pic.png"
 curl -s -X POST "${A[@]}" -H "Content-Type: image/png" --data-binary @"$WORK/pic.png" localhost:$PORT/api/clipboard >/dev/null
 check "clipboard: pictures both ways"     'grep -q "^image/png$" "$STATE/cliptype" && curl -s -D "$WORK/h" -o "$WORK/back.png" "${A[@]}" localhost:$PORT/api/clipboard && cmp -s "$WORK/pic.png" "$WORK/back.png" && grep -qi "content-type: image/png" "$WORK/h"'
 check "clipboard needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/api/clipboard)" = 401 ]'
+check "path API answers for the caller"   'curl -s "${A[@]}" localhost:$PORT/api/path | grep -q "\"known\": false"'
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -375,6 +382,9 @@ HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.4; echo copied > \"$
 check "app: clipboard off means no sync"  '! grep -q "/api/clipboard" "$LOG"'
 printf "Clipboard sync: Off (turn on)\nfalse\n" > "$STATE/choices"; HOME=$MH "$L2"
 check "app: menu turns it back on"        'grep -q "^CLIPBOARD=1$" "$MH/.config/omarchy-stream/client.env"'
+: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="echo 00:00:01 - Connecting to 100.73.206.17" "$L2"
+check "app: asks host for path (fast)"    'grep -q "CURL -fsS -m 2 .*/api/path" "$LOG"'
+check "app: sends Moonlight log after"    'grep -q "moonlight log (started at" "$LOG" && grep -q "00:00:01 - Connecting" "$LOG"'
 check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
 check "app: sound on Omarchy speakers"    'grep -q -- "--audio-on-host" "$LOG" && grep -q "^AUDIO=host$" "$MH/.config/omarchy-stream/client.env"'
