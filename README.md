@@ -1,309 +1,124 @@
-# Omarchy Remote Access Control System
+# omarchy-stream 2.0
 
-Complete remote desktop streaming solution with web dashboard and Raycast extension.
+Parsec-style remote desktop from an **Omarchy (Hyprland)** PC to a **Mac**, built on
+Sunshine + Moonlight over Tailscale. Click an app on the Mac and get a screen sized to the
+Mac, one cursor, a synced clipboard, and sound where you want it.
 
-## Features
+2.0 replaces `omarchy-remote-dashboard` v1. It was developed and verified on a real host
+(RTX 3070, Hyprland 0.56, three monitors, MacBook Air on Wi-Fi). `HARDWARE-NOTES.md` records
+what was measured and every fix it led to.
 
-### Web Dashboard (http://localhost:8080)
-- **Real-time System Monitoring**: CPU, Memory, GPU usage and temperature
-- **Service Status**: Live status of Tailscale, Sunshine, and WireGuard
-- **Service Control**: Start, stop, restart Sunshine streaming
-- **Connection Status**: See if your Mac is connected via Tailscale
-- **Auto-refresh**: Updates every 5 seconds
+## What's new in 2.0
 
-### Raycast Extension (Mac)
-- **Quick Connect**: Launch Moonlight to Omarchy with one command
-- **System Status**: View all stats from Raycast
-- **Remote Control**: Control Sunshine service remotely
-- **Desktop Switching**: Switch Mac virtual desktops
+**A real Mac app.** *Omarchy Remote* sits in the Dock: click it, pick a mode, done. No Terminal
+after a one-line install. It updates itself from the PC on every launch.
 
-## Installation
+**Virtual display, Parsec-style.** The PC creates an invisible screen exactly your Mac's size
+(e.g. 2560×1664), streams it pixel-for-pixel, opens it on your main workspace, and removes it
+when you disconnect, putting your monitors back on their usual workspaces.
 
-### On Omarchy (Linux)
+**One cursor.** Moonlight captures the mouse and you drive the PC's cursor. No ghost second
+pointer.
 
-Already installed and configured! Services start automatically on boot:
-- Tailscale daemon
-- Sunshine streaming server
-- WireGuard VPN
-- Remote Access Dashboard (Flask API + Web UI)
+**Clipboard sync, both ways.** Text and pictures, including Raycast's clipboard history. A 30 ms
+pasteboard watcher on the Mac catches even quick clipboard swaps. Connecting never overwrites
+your Mac clipboard. Toggle it in the menu (on by default).
 
-### On Mac
+**Choose where sound plays.** This Mac, or the PC's speakers (e.g. better speakers at the
+office). With PC speakers, Sunshine's copy is muted so you don't hear it twice.
 
-1. **Install Moonlight**: Download from [moonlight-stream.org](https://moonlight-stream.org)
-2. **Install Tailscale**: Download from [tailscale.com/download](https://tailscale.com/download)
-3. **Install Raycast Extension**:
-   ```bash
-   # Copy the extension folder to your Mac
-   cd ~/raycast-omarchy-remote
-   npm install
-   npm run dev
-   ```
+**Stream keys.** While streaming: Ctrl+Option+1…5 brings a workspace to the screen you're
+watching, Ctrl+Option+Q disconnects. They exist only during a session.
 
-## Usage
+**Smarter connection.** It measures the path before connecting (direct vs relayed, latency
+spikes, loss) and picks the bitrate, capped at 25 Mbps on Wi-Fi. AirDrop (AWDL), a common cause
+of Mac Wi-Fi lag spikes, is paused while you stream and restored afterwards.
 
-**📋 [Complete Keyboard Shortcuts Guide →](KEYBOARD-SHORTCUTS.md)**
+**Plug and play.** Pairing with Moonlight is automatic. The installer detects your Sunshine unit
+and binary (e.g. `apollo.service`), finds a free dashboard port, and backs up everything it
+touches. `doctor` checks capture, encoder, input, routing and the Tailscale path.
 
-### Connecting from Mac
+**Faster launch.** Path check in about a second, no fixed sleeps, screen ready in about 2 s on the PC.
 
-1. Make sure Tailscale is running on both machines
-2. Open Moonlight
-3. Add host: `100.73.206.17` (or use Raycast: `connect`)
-4. Enter pairing PIN if prompted (visible in Sunshine dashboard)
-5. **IMPORTANT: Select "All Monitors (5760x1080)"** to stream all 3 monitors
-   - Selecting "Desktop" will only show one monitor
-   - Individual monitor options (HDMI, DP-1, DP-2) stream single monitors
-6. Enjoy full 3-monitor streaming!
+**Safe when remote.** The PC never locks on disconnect by default (a locked host can strand
+you). Opt in with `lock_on_disconnect`.
 
-#### Moonlight Settings for Slow Connections
+**Diagnostics without asking you.** Each session the Mac sends its Wi-Fi details, per-step
+launch timing, Moonlight's log and the clipboard log to the PC, so problems can be diagnosed there.
 
-If you're on a slow/unstable connection (like office wifi):
+## Using it (Mac)
 
-1. In Moonlight, go to **Settings**
-2. Set **Bitrate**: 10 Mbps (or lower if still laggy)
-3. Set **Resolution**: 1920x1080 or lower (will scale the 5760x1080 down)
-4. Set **FPS**: 30 fps (configured on server)
-5. Enable **Hardware Decoding** for better performance
+| Menu item | What happens |
+|---|---|
+| Screen sized to this Mac | Invisible screen at your Mac's resolution (recommended) |
+| Main monitor (ultrawide) | Streams the PC's main monitor |
+| All three monitors | One Moonlight window per PC monitor |
+| Check connection | Direct/relayed, latency and the bitrate it would use |
+| Sound: this Mac / Omarchy speakers | Toggle where audio plays |
+| Clipboard sync: On / Off | Toggle clipboard sync |
 
-The server is optimized for 10 Mbps with FEC (Forward Error Correction) for packet loss.
+| Keys while streaming (Option = Alt) | Action |
+|---|---|
+| Ctrl+Option+1 … 5 | Bring that workspace to the screen you're watching |
+| Ctrl+Option+Q | Disconnect |
+| Ctrl+Option+Shift+Z | Release the mouse to the Mac (Moonlight) |
+| Ctrl+Option+Shift+S | Stats overlay (Moonlight) |
 
-#### Mouse Capture and Desktop Switching
+## Install
 
-When streaming, Moonlight captures your mouse and keyboard. To switch Mac desktops or use Mac shortcuts:
-
-**Key Shortcut: `Ctrl + Alt + Shift + Z`** - Toggle mouse/keyboard capture on/off
-
-**How to switch Mac desktops while streaming:**
-1. Press `Ctrl + Alt + Shift + Z` to release mouse/keyboard
-2. Use `Ctrl + Left/Right Arrow` to switch Mac desktops (or swipe with 3 fingers on trackpad)
-3. Press `Ctrl + Alt + Shift + Z` again to recapture for streaming
-
-**Other useful Moonlight shortcuts:**
-- `Ctrl + Alt + Shift + Q` - Quit streaming session
-- `Ctrl + Alt + Shift + X` - Toggle fullscreen/windowed mode
-- `Ctrl + Alt + Shift + S` - Show performance stats
-- `Ctrl + Alt + Shift + M` - Toggle mouse mode
-- `Ctrl + Alt + Shift + D` - Minimize stream window
-- `Ctrl + Alt + Shift + V` - Paste clipboard from Mac to Linux
-
-#### Clipboard Sync (Copy/Paste Between Mac and Linux)
-
-Clipboard sync is built into Moonlight/Sunshine with a keyboard shortcut:
-
-**Mac → Linux (Omarchy):**
-1. Copy text on your Mac (`Cmd + C`)
-2. While streaming in Moonlight, press `Ctrl + Alt + Shift + V`
-3. This pastes your Mac clipboard directly on Omarchy
-
-**Linux (Omarchy) → Mac:**
-Unfortunately, clipboard sync from Linux to Mac is not fully supported. Workarounds:
-- Use a cloud clipboard service (Dropbox, Google Keep, etc.)
-- SSH and pipe through clipboard: `ssh omarchy "cat file.txt" | pbcopy`
-- Use the Raycast extension API to send text
-
-**Note:** Moonlight's `Ctrl + Alt + Shift + V` is the primary way to transfer clipboard from Mac to Linux during streaming.
-
-### Web Dashboard
-
-Access at `http://localhost:8080` on Omarchy (opens automatically on login)
-
-**Features**:
-- View system stats
-- Monitor all services
-- Control Sunshine (start/stop/restart)
-- See Mac connection status
-- Quick links to Sunshine and Tailscale admin
-
-**Keyboard Shortcuts**:
-- `Ctrl+S`: Open Sunshine dashboard
-- `Ctrl+R`: Restart Sunshine
-
-### Omarchy Monitor & Desktop Switching (Mac-like shortcuts)
-
-Use these keyboard shortcuts on **Omarchy** while streaming:
-
-**Move active window to specific monitor:**
-- `Ctrl + 1` - Move window to **Left Monitor** (HDMI-A-2)
-- `Ctrl + 2` - Move window to **Middle Monitor** (DP-2)
-- `Ctrl + 3` - Move window to **Right Monitor** (DP-1)
-- `Ctrl + Shift + Left/Right` - Move window to adjacent monitor
-
-**Focus monitor (cursor only):**
-- `Ctrl + Alt + 1/2/3` - Move cursor to Left/Middle/Right monitor
-
-**Switch between virtual desktops/workspaces:**
-- `Super + 1/2/3` - Switch to Desktop 1/2/3
-- `Super + Left/Right Arrow` - Previous/Next Desktop
-
-**Move windows between desktops:**
-- `Ctrl + Shift + 1/2/3` - Move window to Desktop 1/2/3 (and follow)
-
-These work like Mac's window management!
-
-### Raycast Commands (Mac)
-
-- `connect` - Quick connect to Omarchy
-- `status` - View system status
-- `control` - Control Sunshine service
-- `switch-desktop [1-9|next|prev|left|right]` - Switch Mac desktops
-- `switch-workspace [1-9|next|prev]` - Switch Omarchy Hyprland workspaces remotely
-
-## API Endpoints
-
-The Flask server exposes these REST API endpoints:
-
-- `GET /api/status` - Get all system and service status
-- `GET /api/ping` - Health check
-- `POST /api/sunshine/start` - Start Sunshine
-- `POST /api/sunshine/stop` - Stop Sunshine
-- `POST /api/sunshine/restart` - Restart Sunshine
-- `GET /api/sunshine/pin` - Get pairing PIN
-- `POST /api/workspace/switch/<workspace>` - Switch Hyprland workspace (1-9, next, prev)
-- `GET /api/workspace/current` - Get current active workspace
-
-All endpoints are accessible via Tailscale network from your Mac.
-
-## Configuration
-
-### Dashboard Autostart
-The dashboard starts automatically via Hyprland autostart:
-`~/.config/hypr/autostart.conf`
-
-### Service Management
-- Tailscale: `systemctl status tailscaled`
-- Sunshine: `systemctl --user status sunshine`
-- WireGuard: `systemctl status wg-quick@wg0`
-- Dashboard: Check process running on port 8080
-
-### Firewall
-All required ports are open:
-- 47989/tcp - Sunshine streaming
-- 47990/tcp - Sunshine web UI
-- 48010/tcp - Sunshine RTSP
-- 47998-48000/udp - Sunshine video/audio
-- 8080/tcp - Dashboard API
-- Tailscale network (100.64.0.0/10) - Full access
-
-## Troubleshooting
-
-### Error -1: Connection Terminated / Keeps Disconnecting
-
-**Problem**: Moonlight shows "Error -1" and keeps disconnecting randomly.
-
-**Root Cause**: Multiple active network interfaces (Ethernet + WiFi) cause packet routing conflicts.
-
-**Solution**: Disable WiFi and use only Ethernet
+**PC (Omarchy):**
 ```bash
-# Temporarily disable WiFi
-sudo ip link set wlan0 down
+yay -S sunshine-git                      # or sunshine
+sudo systemctl enable --now tailscaled && sudo tailscale up
+./install.sh -y
+omarchy-stream doctor                    # everything should be green
+```
+`install.sh` sets KMS capture, registers the session hooks, installs the dashboard
+(localhost + Tailscale IP only, token auth), and adds one guarded line to `hyprland.lua`
+so the virtual screen's size survives config reloads. Backups: `*.bak.<timestamp>`.
 
-# Or use the provided script
-~/remote-access-dashboard/disable-wifi.sh
+**Mac, once:** paste the line `omarchy-stream mac` prints on the PC into Terminal:
+```bash
+curl -fsSL -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/mac/setup | bash
+```
+It installs Omarchy Remote.app (Applications + Dock), the `omarchy-connect` command, Moonlight
+via Homebrew if missing, your settings, and a one-time sudoers rule for the AirDrop pause.
 
-# Restart Sunshine after changing network
-systemctl --user restart sunshine
+## Host commands
+
+```
+omarchy-stream doctor [--json]     what's wrong and how to fix it
+omarchy-stream monitors            monitors and the combined desktop
+omarchy-stream virtual WxH@HZ,S    create the virtual screen (or: off)
+omarchy-stream multi setup|up|down one Sunshine per monitor
+omarchy-stream disconnect          end all streams
+omarchy-stream mac                 print the Mac setup line
+omarchy-stream serve               dashboard/API (runs as a user service)
 ```
 
-**Make it permanent**: Add to Hyprland autostart or create a systemd service.
+Settings: `~/.config/omarchy-stream/config.json` (PC), `~/.config/omarchy-stream/client.env` (Mac).
+Logs: PC `~/.config/omarchy-stream/{client-report,clipboard}.log`; Mac `~/Library/Logs/omarchy-*.log`.
 
-**Other potential causes:**
-- Network speed mismatch between host and client
-- VPN interfering with local network
-- Firewall blocking UDP ports 47998-48000
-- High packet loss or jitter on network
+## How it works
 
-### Can't connect from Mac
-1. Check Tailscale is running on both machines: `tailscale status`
-2. Check Sunshine is running: `systemctl --user status sunshine`
-3. Check firewall: `sudo ufw status`
-4. Test API: `curl http://100.73.206.17:8080/api/ping`
-5. **Make sure WiFi is disabled** if you're using Ethernet
+- **Capture**: KMS for physical monitors; the virtual screen is a headless Hyprland output captured
+  with wlroots screencopy (GPU dmabuf path). Sunshine on Linux captures one output per instance, so
+  "all monitors" means one instance (and window) per monitor, mapped by DRM connector order.
+- **Hooks** (Sunshine `global_prep_cmd`): VRR off, stream-only keybindings and audio routing on
+  connect; all restored on disconnect.
+- **Dashboard API** (token auth): virtual screen, multi up/down, pairing, clipboard, path check,
+  audio preference, Mac diagnostics, and the Mac app's self-update files.
 
-### Dashboard not opening on login
-1. Check autostart: `grep "Remote Access" ~/.config/hypr/autostart.conf`
-2. Check if server is running: `ss -tlnp | grep 8080`
-3. Manually start: `~/remote-access-dashboard/serve.sh`
+## Tests
 
-### Moonlight can't find host
-1. Verify Tailscale IP: `tailscale status`
-2. Check Sunshine web UI: `https://localhost:47990`
-3. Try adding by IP directly: `100.73.206.17`
+`tests/run.sh` runs 161 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
+macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API, Mac client and app.
 
-### Only seeing one monitor
-1. In Moonlight, make sure you selected **"All Monitors (5760x1080)"** NOT "Desktop"
-2. Check Sunshine config: `~/.config/sunshine/sunshine.conf` should have `width = 5760` and `height = 1080`
-3. Verify all monitors are detected: `hyprctl monitors`
-4. Restart Sunshine: `systemctl --user restart sunshine`
+## Known limits
 
-### Mouse lag / stuttering / unresponsive input
+- The Mac app is unsigned (installed via `curl`, so Gatekeeper doesn't quarantine it).
+- Raycast "Paste" can race the sync by a few milliseconds; if the previous item pastes, press Cmd+V again.
+- Mac Wi-Fi still shows occasional latency spikes; a cable gives the best result.
+- Upgrading from v1: `install.sh` comments out v1's `serve.sh` / `disable-wifi.sh` autostart lines.
 
-**Problem**: Mouse feels sluggish, laggy, or stutters during streaming.
-
-**Solution**: The configuration has been optimized with low-latency settings:
-```bash
-# Settings already added to ~/.config/sunshine/sunshine.conf:
-nvenc_preset = 1                    # Fastest encoding
-nvenc_realtime_hags = enabled       # Hardware GPU scheduling
-nvenc_latency_over_power = enabled  # Prioritize latency over power
-minimum_fps_target = 15             # Maintain responsiveness
-```
-
-**Additional fixes:**
-1. **View performance stats**: Press `Ctrl + Alt + Shift + S` during streaming to see where lag is (encode/network/decode)
-2. **Check hardware decoding**: Make sure Moonlight is using hardware decode (not software)
-3. **Reduce resolution**: Try 1920x1080 in Moonlight settings instead of 5760x1080
-4. **Lower FEC**: If network is stable, reduce `fec_percentage` from 20 to 10 in sunshine.conf
-5. **Disable vsync**: Run `nvidia-settings` and disable "sync to vblank" or set to "fast"
-
-**If still laggy after these fixes:**
-- Attach a physical mouse to the Omarchy host and test (rules out software issues)
-- Test on Xorg instead of Wayland if using Wayland
-- Check `nvidia-smi` to ensure GPU isn't throttling
-
-### Stream is laggy/stuttering on slow connection
-1. Lower bitrate in Moonlight settings (try 5-8 Mbps)
-2. Lower resolution in Moonlight (try 1920x1080 instead of 5760x1080)
-3. Reduce FPS in `~/.config/sunshine/sunshine.conf` (set `fps = 30` or `fps = 24`)
-4. Increase `qp` value for more compression (try `qp = 32`)
-5. Make sure hardware decoding is enabled in Moonlight
-6. Check network: `ping 100.73.206.17` should show <50ms latency
-
-## Development
-
-### Flask API Server
-```bash
-cd ~/remote-access-dashboard
-python3 api-server.py
-```
-
-### Raycast Extension
-```bash
-cd ~/raycast-omarchy-remote
-npm install
-npm run dev
-```
-
-## Files
-
-- `~/remote-access-dashboard/` - Dashboard and API server
-  - `api-server.py` - Flask REST API
-  - `index.html` - Web dashboard
-  - `serve.sh` - Startup script
-- `~/raycast-omarchy-remote/` - Raycast extension
-  - `src/connect.tsx` - Quick connect command
-  - `src/status.tsx` - System status view
-  - `src/control.tsx` - Service control
-  - `src/switch-desktop.tsx` - Desktop switching
-- `~/.config/hypr/autostart.conf` - Hyprland autostart config
-
-## Tech Stack
-
-- **Backend**: Python Flask, psutil
-- **Frontend**: HTML/CSS/JavaScript
-- **Mac Client**: Raycast (TypeScript/React)
-- **Streaming**: Sunshine + Moonlight
-- **VPN**: Tailscale, WireGuard
-- **System**: Arch Linux, Hyprland
-
-## License
-
-MIT
+See [KEYBOARD-SHORTCUTS.md](KEYBOARD-SHORTCUTS.md) for more Moonlight and Hyprland shortcuts.

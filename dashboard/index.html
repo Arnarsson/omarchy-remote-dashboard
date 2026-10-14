@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Omarchy Stream</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --fg:#e6e8ec; --mute:#8a93a3;
+          --ok:#3fb950; --warn:#d29922; --fail:#f85149; --accent:#7aa2f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
+  main { max-width:1100px; margin:0 auto; padding:20px 16px 40px; }
+  header { display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; margin-bottom:16px; }
+  h1 { font-size:20px; margin:0; } h2 { font-size:13px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:0 0 10px; }
+  .grid { display:grid; gap:14px; grid-template-columns:repeat(auto-fit, minmax(320px, 1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .row { display:flex; align-items:center; gap:8px; padding:6px 0; border-top:1px solid var(--line); }
+  .row:first-of-type { border-top:0; }
+  .grow { flex:1; min-width:0; } .mute { color:var(--mute); font-size:12px; }
+  .dot { width:9px; height:9px; border-radius:50%; flex:none; background:var(--mute); }
+  .ok { background:var(--ok); } .warn { background:var(--warn); } .fail { background:var(--fail); }
+  button { background:#222838; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 10px; cursor:pointer; font:inherit; }
+  button:hover { border-color:var(--accent); }
+  code { background:#0b0d11; padding:1px 5px; border-radius:4px; font-size:12px; word-break:break-all; }
+  .fix { color:var(--mute); font-size:12px; margin:2px 0 0 17px; }
+  .stats { display:flex; gap:18px; flex-wrap:wrap; } .stat b { font-size:22px; display:block; }
+  #login { display:none; } #login input { background:#0b0d11; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px; width:100%; margin:8px 0; }
+</style>
+</head>
+<body>
+<main>
+  <header><h1>Omarchy Stream</h1><span class="mute" id="host"></span><span class="mute" id="updated"></span></header>
+
+  <div class="card" id="login">
+    <h2>Token</h2>
+    <div class="mute">Paste the contents of <code>~/.config/omarchy-stream/token</code> from the host.</div>
+    <input id="tok" type="password" autocomplete="off"><button onclick="saveToken()">Save</button>
+  </div>
+
+  <div class="grid" id="app" hidden>
+    <section class="card"><h2>Streams</h2><div id="streams"></div>
+      <div class="mute" style="margin-top:8px">One mode at a time: all-monitors <i>or</i> per-monitor instances.</div></section>
+    <section class="card"><h2>Network path</h2><div id="peers"></div></section>
+    <section class="card"><h2>Host</h2><div class="stats" id="stats"></div><div id="mons" style="margin-top:10px"></div></section>
+    <section class="card" style="grid-column:1/-1"><h2>Doctor <button onclick="doctor()" style="float:right">Run</button></h2><div id="doctor" class="mute">Checks capture, encoder, input, routing and Tailscale path.</div></section>
+  </div>
+</main>
+<script>
+let token = '';
+try { token = localStorage.getItem('omarchy-stream-token') || ''; } catch (e) {}
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function api(path, method = 'GET') {
+  const r = await fetch(path, { method, headers: { Authorization: 'Bearer ' + token } });
+  if (r.status === 401) { showLogin(); throw new Error('auth'); }
+  return r.json();
+}
+function showLogin() { $('login').style.display = 'block'; $('app').hidden = true; }
+function saveToken() {
+  token = $('tok').value.trim();
+  try { localStorage.setItem('omarchy-stream-token', token); } catch (e) {}
+  $('login').style.display = 'none'; refresh();
+}
+
+async function refresh() {
+  let s; try { s = await api('/api/status'); } catch (e) { return; }
+  $('app').hidden = false;
+  $('host').textContent = s.host + (s.tailscale.ip ? ' · ' + s.tailscale.ip : '');
+  $('updated').textContent = 'updated ' + new Date().toLocaleTimeString();
+
+  $('streams').innerHTML = s.streams.map(x => `
+    <div class="row"><span class="dot ${x.state === 'active' ? 'ok' : ''}"></span>
+      <div class="grow">${esc(x.name)} <span class="mute">port ${x.port} · ${esc(x.state)}</span></div>
+      ${x.state === 'active'
+        ? `<button onclick="act('${esc(x.unit)}','restart')">Restart</button><button onclick="act('${esc(x.unit)}','stop')">Stop</button>`
+        : `<button onclick="act('${esc(x.unit)}','start')">Start</button>`}
+    </div>`).join('');
+
+  const peers = s.tailscale.peers.filter(p => p.online);
+  $('peers').innerHTML = !s.tailscale.running ? '<div class="row"><span class="dot fail"></span>Tailscale not running</div>'
+    : peers.length ? peers.map(p => `
+      <div class="row"><span class="dot ${p.direct ? 'ok' : 'fail'}"></span>
+        <div class="grow">${esc(p.name)} <span class="mute">${esc(p.os)}</span><br>
+        <span class="mute">${p.direct ? 'direct · ' + esc(p.endpoint) : 'RELAYED via DERP ' + esc(p.relay) + ' — expect lag'}</span></div></div>`).join('')
+    : '<div class="mute">No peers online.</div>';
+
+  const g = s.system.gpu;
+  $('stats').innerHTML = [['CPU', s.system.cpu + '%'], ['RAM', s.system.memory + '%']]
+    .concat(g ? [['GPU', g.util + '%'], ['NVENC', g.encoder + '%'], ['Temp', g.temp + '°C']] : [])
+    .map(([k, v]) => `<div class="stat"><b>${v}</b><span class="mute">${k}</span></div>`).join('');
+  $('mons').innerHTML = s.monitors.map(m => `<div class="row"><div class="grow">${esc(m.name)}</div><span class="mute">${m.size} @ ${m.hz}Hz</span></div>`).join('')
+    + (s.desktop ? `<div class="mute" style="margin-top:6px">All-monitors resolution for Moonlight: <code>${esc(s.desktop)}</code></div>` : '');
+}
+
+async function act(unit, action) { try { await api(`/api/stream/${encodeURIComponent(unit)}/${action}`, 'POST'); } catch (e) {} refresh(); }
+
+async function doctor() {
+  $('doctor').textContent = 'Running…';
+  let res; try { res = await api('/api/doctor'); } catch (e) { return; }
+  $('doctor').innerHTML = res.map(r => `
+    <div class="row" style="display:block"><span class="dot ${r.status}" style="display:inline-block"></span>
+      <b>${esc(r.check)}</b> <span class="mute">${esc(r.detail)}</span>
+      ${r.fix ? `<div class="fix">fix: <code>${esc(r.fix)}</code></div>` : ''}</div>`).join('');
+}
+
+if (token) refresh(); else showLogin();
+setInterval(() => { if (token) refresh(); }, 5000);
+</script>
+</body>
+</html>

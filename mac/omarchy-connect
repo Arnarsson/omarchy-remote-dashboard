@@ -1,0 +1,326 @@
+#!/usr/bin/env bash
+# omarchy-connect: one-command Parsec-style connect from macOS to Omarchy via Moonlight.
+#
+#   omarchy-connect            all monitors in one stream at native desktop size
+#   omarchy-connect virtual    a virtual display on the host sized to this Mac's screen (pixel-perfect)
+#   omarchy-connect multi      one Moonlight window per monitor (needs `omarchy-stream multi up`)
+#   omarchy-connect check      measure the network path and show the bitrate it would use
+#
+# Setup: run the one-liner from `omarchy-stream mac` on the host; it fills in everything.
+# Extra streams (virtual, multi) pair themselves the first time.
+#
+# Bitrate adapts to the measured path. Settings: ~/.config/omarchy-stream/client.env
+set -euo pipefail
+
+CONF="$HOME/.config/omarchy-stream/client.env"
+if [[ ! -f $CONF ]]; then
+  mkdir -p "$(dirname "$CONF")"
+  cat > "$CONF" <<'CFG'
+HOST=omarchy                 # Tailscale MagicDNS name or 100.x IP of the host
+DESKTOP_RES=5760x1080        # `omarchy-stream monitors` on the host prints this
+MONITOR_RES=1920x1080        # per-monitor size for `multi`; one size, or one per port in MULTI_PORTS order ("1920x1080 3440x1440 1920x1080")
+FPS=60
+MAX_BITRATE_KBPS=60000       # ceiling; the path measurement scales it down
+CODEC=HEVC                   # HEVC or AV1 (AV1 needs an M3+ Mac and RTX 40+ GPU)
+MULTI_PORTS="48089 48189 48289"   # printed by `omarchy-stream multi setup`
+VIRTUAL_PORT=48989
+TOKEN=                       # host: cat ~/.config/omarchy-stream/token  (needed for `virtual`)
+DASHBOARD_PORT=8080
+CFG
+  chmod 600 "$CONF"
+  echo "Created $CONF - edit HOST/DESKTOP_RES (and TOKEN for virtual), then rerun."; exit 0
+fi
+# shellcheck disable=SC1090
+source "$CONF"
+
+MOONLIGHT=${MOONLIGHT:-/Applications/Moonlight.app/Contents/MacOS/Moonlight}
+TS=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)
+
+# Measure the path: direct vs relayed, median RTT, loss. Sets BITRATE (kbps) and prints why.
+measure() {
+  local out pings n_ok rtts median relayed=no factor=100
+  # The host says direct vs relayed (its Tailscale status, instant); meanwhile ten pings 0.1 s apart
+  # give RTT, spikes and loss. The Mac's Tailscale CLI is only the fallback (it takes seconds to start).
+  local pathf; pathf=$(mktemp)
+  [[ -n ${TOKEN:-} ]] && curl -fsS -m 2 -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/path" -o "$pathf" 2>/dev/null &
+  pings=$(ping -c 10 -i 0.1 -t 3 "$HOST" 2>&1 || true)
+  wait 2>/dev/null || true
+  if grep -q '"known": true' "$pathf" 2>/dev/null; then
+    grep -q '"direct": false' "$pathf" && relayed=yes
+  else
+    out=$("$TS" ping -c 1 --until-direct=false "$HOST" 2>&1 || true)
+    grep -q 'via DERP' <<<"$out" && relayed=yes
+  fi
+  rm -f "$pathf"
+  n_ok=$(grep -c 'bytes from' <<<"$pings" || true)
+  rtts=$(grep -o 'time=[0-9.]*' <<<"$pings" | cut -d= -f2 | sort -n || true)
+  if [[ $n_ok -eq 0 ]]; then
+    echo "✘ $HOST unreachable over Tailscale. Is Tailscale on, and is the Omarchy PC awake?"; exit 1
+  fi
+  median=$(awk '{a[NR]=$1} END {print int(a[int((NR+1)/2)])}' <<<"$rtts")
+  # Spikes matter more than the median: Wi-Fi bursts of 100 ms cause packet loss and keyframe storms.
+  local p90; p90=$(awk '{a[NR]=$1} END {i=int(NR*0.9+0.5); if(i<1)i=1; print int(a[i])}' <<<"$rtts")
+  local spike=$(( p90 - median ))
+  local loss=$(( (10 - n_ok) * 10 ))
+  if   [[ $relayed == yes ]]; then factor=25
+  elif (( median > 60 || loss > 10 || spike > 40 )); then factor=40
+  elif (( median > 25 || loss > 0 || spike > 15 )); then factor=70
+  fi
+  local max=$MAX_BITRATE_KBPS
+  if on_wifi && (( max > ${WIFI_MAX_BITRATE_KBPS:-25000} )); then max=${WIFI_MAX_BITRATE_KBPS:-25000}; fi
+  BITRATE=$(( max * factor / 100 ))
+  PATH_LINE="relayed=$relayed rtt=${median}ms p90=${p90}ms loss=${loss}% wifi=$(on_wifi && echo yes || echo no) -> ${BITRATE}kbps"
+  printf 'path: %s  rtt %sms  spikes +%sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
+    "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$spike" "$loss" $(( BITRATE / 1000 )) "$factor"
+  notify "$([[ $relayed == yes ]] && echo 'Relayed connection' || echo 'Direct connection'), $(( BITRATE / 1000 )) Mbps"
+  if [[ $relayed == yes ]]; then
+    echo "  ⚠ relayed: enable UPnP on the host's router or forward UDP 41641 to the host for full quality"
+  fi
+}
+
+# Native pixel size of the Mac's main display, e.g. 3024x1964.
+mac_resolution() {
+  system_profiler SPDisplaysDataType 2>/dev/null \
+    | awk '/Resolution:/ {gsub(/ /,""); split($0,a,":"); split(a[2],r,/[^0-9x]/); print r[1]; exit}'
+}
+
+# Wi-Fi or cable? Wi-Fi gets a lower ceiling: bursts of delay hurt more at high bitrates.
+on_wifi() {
+  local ifc; ifc=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  [[ -n $ifc ]] && networksetup -listallhardwareports 2>/dev/null | grep -A1 -E 'Wi-Fi|AirPort' | grep -q "Device: $ifc"
+}
+
+# Send Wi-Fi diagnostics to the host (~/.config/omarchy-stream/client-report.log there).
+report() {
+  [[ -n ${TOKEN:-} ]] || return 0
+  {
+    echo "mode=$1 ${PATH_LINE:-}"
+    echo "timing: ${TIMES:-}"
+    echo "awdl: $(ifconfig awdl0 2>/dev/null | head -1)"
+    sw_vers 2>/dev/null | tr '\n' ' '; echo
+    system_profiler SPAirPortDataType 2>/dev/null \
+      | awk '/Current Network Information:/{f=1; next} f&&/Other Local Wi-Fi Networks:/{exit} f' \
+      | grep -E 'PHY Mode|Channel|Signal / Noise|Transmit Rate|MCS|Security' | head -8
+  } | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
+      "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
+}
+
+# Seconds since the app was clicked, per step (sent in the report).
+T0=${OMARCHY_T0:-$(date +%s)}; TIMES=
+stamp() { TIMES+="$1=$(( $(date +%s) - T0 ))s "; }
+
+# The app's launcher updates through here too: swap it atomically (bash keeps the old inode).
+update_launcher() {
+  [[ -n ${OMARCHY_GUI:-} && -n ${TOKEN:-} ]] || return 0
+  local me launcher new
+  me=$(cd "$(dirname "$0")" && pwd); launcher="$me/../MacOS/omarchy-remote"
+  [[ -f $launcher ]] || return 0
+  new="$launcher.new"
+  if curl -fsS -m 3 -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/mac/app/omarchy-remote" -o "$new" 2>/dev/null \
+     && head -1 "$new" | grep -q '^#!/bin/bash' && bash -n "$new" && ! cmp -s "$new" "$launcher"; then
+    chmod +x "$new" && mv -f "$new" "$launcher"
+  fi
+  rm -f "$new"
+}
+
+# After a session: Moonlight's own log (connect timing, decoder, errors) to the host, in the background.
+send_log() {
+  local cl="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"
+  [[ -n ${TOKEN:-} ]] && [[ -s $2 || -s $cl ]] || { rm -f "$2"; return 0; }
+  local real; real=$(grep -o 'Redirecting log output to [^ ]*' "$2" 2>/dev/null | awk '{print $NF}' | tail -1 || true)
+  { echo "mode=$1 moonlight log (started at +${TIMES##*moonlight=}):"; tail -120 "$2"
+    [[ -n $real && -f $real ]] && { echo "--- $real:"; tail -150 "$real"; }
+    echo "--- clipboard log:"; tail -30 "$cl" 2>/dev/null; } \
+    | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
+      "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
+  rm -f "$2"
+}
+
+# Notification when run from Omarchy Remote.app (no terminal to print to).
+notify() {
+  [[ -n ${OMARCHY_GUI:-} ]] || return 0
+  osascript -e "display notification \"${1//\"/}\" with title \"Omarchy Remote\"" >/dev/null 2>&1 || true
+}
+
+# macOS AWDL (AirDrop/Handoff) pulls the Wi-Fi radio off-channel every second or so: 100 ms spikes.
+# Setup installs a sudoers rule for exactly these two commands, so this never prompts.
+wifi_quiet() {
+  [[ ${AWDL_OFF:-1} == 1 ]] || return 0
+  ifconfig awdl0 2>/dev/null | grep -q '<UP' || return 0
+  if sudo -n /sbin/ifconfig awdl0 down 2>/dev/null; then
+    AWDL_PAUSED=1; echo "AirDrop paused while streaming (stops Wi-Fi lag spikes)"
+  fi
+}
+wifi_restore() {
+  [[ -n ${AWDL_PAUSED:-} ]] && sudo -n /sbin/ifconfig awdl0 up 2>/dev/null && echo "AirDrop back on." || true
+}
+
+# Clipboard sync while streaming, both ways: text and pictures (PNG). So Raycast's clipboard
+# history (or Cmd+C on either side) works across. Off: CLIPBOARD=0 in client.env (or the app menu).
+# Mac side: one long-running JXA watcher polls NSPasteboard.changeCount every 30 ms and grabs the
+# content immediately, so even clipboard managers that swap it back right after pasting are caught.
+CLIP_JXA='ObjC.import("AppKit");
+function out(l){ $.NSFileHandle.fileHandleWithStandardOutput.writeData($(l + "\n").dataUsingEncoding($.NSUTF8StringEncoding)); }
+function run(argv){ var dir = argv[0], pb = $.NSPasteboard.generalPasteboard, c = pb.changeCount, k = 0;
+  while (true) { delay(0.03); var n = pb.changeCount; if (n === c) continue; c = n; k++;
+    var s = pb.stringForType("public.utf8-plain-text");
+    if (s && !s.isNil()) { var p = dir + "/t" + k; s.writeToFileAtomicallyEncodingError(p, true, 4, null); out("text " + p); continue; }
+    var d = pb.dataForType("public.png");
+    if (!d || d.isNil()) { var t = pb.dataForType("public.tiff");
+      if (t && !t.isNil()) d = $.NSBitmapImageRep.imageRepWithData(t).representationUsingTypeProperties(4, $()); }
+    if (d && !d.isNil()) { var q = dir + "/i" + k + ".png"; d.writeToFileAtomically(q, true); out("png " + q); } } }'
+
+clip_sync() {
+  [[ ${CLIPBOARD:-1} == 1 && -n ${TOKEN:-} ]] || return 0
+  set +e +o pipefail   # runs in its own subshell: one failed curl/osascript must not end the loop
+  local url="http://$HOST:$DASHBOARD_PORT/api/clipboard" auth="Authorization: Bearer $TOKEN"
+  CLIPLOG="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"; mkdir -p "$(dirname "$CLIPLOG")" 2>/dev/null
+  local dir n=0 code w
+  dir=$(mktemp -d)
+  clog() { echo "$(date +%H:%M:%S) $*" >> "$CLIPLOG"; }
+  sha() { shasum -a 1 "$1" | cut -d' ' -f1; }
+  push() {
+    if curl -fsS -m 15 -X POST -H "$auth" -H "Content-Type: $2" --data-binary @"$1" "$url" >/dev/null 2>>"$CLIPLOG"; then
+      sha "$1" > "$dir/last"; clog "Mac->Linux $2 $(wc -c < "$1" | tr -d ' ') bytes"
+    else clog "Mac->Linux FAILED ($2)"; fi
+  }
+  clog "start (host $HOST)"
+  # Note what Linux has now without copying it over: connecting must not replace the Mac clipboard.
+  curl -sS -m 5 -H "$auth" -o "$dir/in" "$url" 2>/dev/null && [[ -s $dir/in ]] && sha "$dir/in" > "$dir/last"
+  # Mac -> Linux: the watcher prints "text <file>" / "png <file>" on every clipboard change.
+  echo "$CLIP_JXA" > "$dir/watch.js"
+  ( osascript -l JavaScript "$dir/watch.js" "$dir" 2>>"$CLIPLOG" | while read -r kind f; do
+      [[ -s $f ]] || continue
+      if [[ $(sha "$f") != "$(cat "$dir/last" 2>/dev/null)" ]]; then
+        if [[ $kind == png ]]; then push "$f" image/png; else push "$f" "text/plain; charset=utf-8"; fi
+      fi
+      rm -f "$f"
+    done ) & w=$!
+  trap 'pkill -P $w 2>/dev/null; kill $w 2>/dev/null; clog stop; rm -rf "$dir"' EXIT
+  trap 'exit 0' TERM
+  # Linux -> Mac: ask for the host clipboard unless it's what we already have (304).
+  while sleep 0.6; do
+    n=$((n+1))
+    code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$(cat "$dir/last" 2>/dev/null)" 2>/dev/null)
+    if [[ $code == 200 && -s $dir/in ]]; then
+      sha "$dir/in" > "$dir/last"; clog "Linux->Mac $(grep -i '^content-type' "$dir/hdr" | tr -d '\r' | cut -d' ' -f2) $(wc -c < "$dir/in" | tr -d ' ') bytes"
+      if grep -qi '^content-type: image/png' "$dir/hdr"; then
+        osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
+      else
+        pbcopy < "$dir/in"
+      fi
+    fi
+    # Multi mode has no foreground Moonlight to wait on: stop once no Moonlight window is left.
+    if (( n > 15 && n % 5 == 0 )) && ! pgrep -xq Moonlight; then break; fi
+  done
+}
+
+api() {  # POST to the host dashboard
+  curl -fsS -m "${2:-60}" -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT$1"
+}
+
+# Pair Moonlight with an instance once: Moonlight starts the request, the host submits the PIN.
+pair_once() {
+  local port=$1 mark="$HOME/.config/omarchy-stream/paired.$1" pin mp log
+  [[ -f $mark ]] && return 0
+  pin=$(printf '%04d' $((RANDOM % 10000)))
+  echo "Pairing with $HOST:$port (first time only) ..."; notify "Pairing (first time only)..."
+  "$MOONLIGHT" pair "$HOST:$port" --pin "$pin" >/dev/null 2>&1 & mp=$!
+  if api "/api/pair/$port/$pin" >/dev/null && wait $mp; then
+    touch "$mark"; echo "  paired"; return 0
+  fi
+  kill $mp 2>/dev/null || true
+  # Older Moonlight without --pin: let it pick a PIN, read it from its output, submit that.
+  log=$(mktemp); "$MOONLIGHT" pair "$HOST:$port" >"$log" 2>&1 & mp=$!
+  for _ in $(seq 20); do pin=$(grep -oE '(^|[^0-9])[0-9]{4}([^0-9]|$)' "$log" | grep -oE '[0-9]{4}' | head -1); [[ -n $pin ]] && break; sleep 0.5; done
+  if [[ -n $pin ]] && api "/api/pair/$port/$pin" >/dev/null && wait $mp; then
+    rm -f "$log"; touch "$mark"; echo "  paired"; return 0
+  fi
+  kill $mp 2>/dev/null || true; rm -f "$log"
+  echo "  ✘ automatic pairing failed: in Moonlight, add $HOST:$port and pair by hand"; return 1
+}
+
+need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the setup one-liner from 'omarchy-stream mac')"; exit 1; }; }
+
+# Capture mode: Moonlight hides the Mac cursor and you drive the host's, so exactly one cursor shows.
+# Release the mouse: Ctrl+Option+Shift+Z. MOUSE=absolute in client.env for the Mac's own cursor instead.
+if [[ ${MOUSE:-capture} == absolute ]]; then mouse=(--absolute-mouse); else mouse=(--no-absolute-mouse); fi
+[[ ${SHOW_STATS:-1} == 1 ]] && mouse+=(--performance-overlay)
+# Where sound plays: this Mac (streamed) or the host's own speakers (Moonlight --audio-on-host).
+# The app asks each time, defaulting to the last choice; Terminal users set AUDIO=mac|host in client.env.
+audio_choice() {
+  [[ -n ${OMARCHY_GUI:-} ]] || return 0
+  local last="This Mac" pick
+  [[ ${AUDIO:-mac} == host ]] && last="Omarchy speakers"
+  pick=$(osascript -e "button returned of (display dialog \"Play sound on:\" with title \"Omarchy Remote\" buttons {\"This Mac\", \"Omarchy speakers\"} default button \"$last\")" 2>/dev/null) || return 0
+  if [[ $pick == "Omarchy speakers" ]]; then AUDIO=host; else AUDIO=mac; fi
+  if grep -q '^AUDIO=' "$CONF"; then sed -i.bak "s/^AUDIO=.*/AUDIO=$AUDIO/" "$CONF" && rm -f "$CONF.bak"
+  else echo "AUDIO=$AUDIO" >> "$CONF"; fi
+}
+case "${1:-all}" in all|virtual|multi) [[ -n ${OMARCHY_MENU_AUDIO:-} ]] || audio_choice ;; esac
+[[ ${AUDIO:-mac} == host ]] && mouse+=(--audio-on-host)
+
+KEYS_HINT="Ctrl+Option+1-5: bring workspace here · Ctrl+Option+Q: disconnect"
+
+update_launcher &
+
+common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen "${mouse[@]}")
+
+case "${1:-all}" in
+  check) measure ;;
+  all)
+    stamp start; measure; stamp measured
+    [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
+    [[ -n ${TOKEN:-} ]] && api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
+    wifi_quiet; stamp moonlight; report all &
+    clip_sync & clip=$!
+    notify "$KEYS_HINT"; echo "$KEYS_HINT"
+    mllog=$(mktemp)
+    "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    send_log all "$mllog"
+    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
+  virtual)
+    need_token
+    stamp start; measure; stamp measured
+    res=$(mac_resolution); [[ -n $res ]] || { echo "Couldn't read this Mac's resolution"; exit 1; }
+    scale=1; [[ ${res%x*} -gt 2560 ]] && scale=2
+    echo "Creating ${res}@${FPS} (scale ${scale}) virtual display on $HOST ..."; notify "Creating a ${res} screen on Omarchy..."
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+      "http://$HOST:$DASHBOARD_PORT/api/virtual/${res}@${FPS},${scale}" >/dev/null \
+      || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
+    stamp screen_ready   # the host returns once Sunshine is listening; no fixed wait
+    pair_once "$VIRTUAL_PORT" || true
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
+    wifi_quiet; stamp moonlight; report virtual &
+    clip_sync & clip=$!
+    notify "$KEYS_HINT"; echo "$KEYS_HINT"
+    mllog=$(mktemp)
+    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    send_log virtual "$mllog"
+    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
+    echo "Virtual display removed." ;;
+  multi)
+    need_token
+    measure
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
+    echo "Starting one stream per monitor on $HOST ..."
+    api /api/multi/up >/dev/null || { echo "✘ host could not start the per-monitor streams"; exit 1; }
+    sleep 3
+    for port in $MULTI_PORTS; do pair_once "$port" || true; done
+    per=$(( BITRATE / $(wc -w <<<"$MULTI_PORTS") ))
+    read -ra sizes <<<"$MONITOR_RES"; i=0
+    for port in $MULTI_PORTS; do
+      res=${sizes[$i]:-${sizes[0]}}; i=$((i+1))
+      open -n -a Moonlight --args stream "$HOST:$port" Desktop --resolution "$res" \
+        --bitrate "$per" --fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode windowed "${mouse[@]}"
+      sleep "${LAUNCH_DELAY:-1}"
+    done
+    if wifi_quiet && [[ -n ${AWDL_PAUSED:-} ]]; then   # windows run on their own; restore when the last one closes
+      ( sleep 10; while pgrep -xq Moonlight; do sleep 3; done; sudo -n /sbin/ifconfig awdl0 up ) >/dev/null 2>&1 &
+    fi
+    ( clip_sync ) >/dev/null 2>&1 &   # stops by itself when the last Moonlight window closes
+    notify "Drag each window to its Mac display"
+    echo "Drag each Moonlight window to its Mac display." ;;
+  *) sed -n 2,9p "$0"; exit 1 ;;
+esac
