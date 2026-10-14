@@ -1,0 +1,12 @@
+[Unit]
+Description=omarchy-stream dashboard (localhost + Tailscale, token auth)
+PartOf=graphical-session.target
+After=graphical-session.target tailscaled.service
+
+[Service]
+ExecStart=%h/.local/share/omarchy-stream/omarchy-stream serve
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target

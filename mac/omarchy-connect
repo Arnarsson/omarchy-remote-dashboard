@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# omarchy-connect: one-command Parsec-style connect from macOS to Omarchy via Moonlight.
+#
+#   omarchy-connect            all monitors in one stream at native desktop size
+#   omarchy-connect virtual    a virtual display on the host sized to this Mac's screen (pixel-perfect)
+#   omarchy-connect multi      one Moonlight window per monitor (needs `omarchy-stream multi up`)
+#   omarchy-connect check      measure the network path and show the bitrate it would use
+#
+# Setup: run the one-liner from `omarchy-stream mac` on the host; it fills in everything.
+# Extra streams (virtual, multi) pair themselves the first time.
+#
+# Bitrate adapts to the measured path. Settings: ~/.config/omarchy-stream/client.env
+set -euo pipefail
+
+CONF="$HOME/.config/omarchy-stream/client.env"
+if [[ ! -f $CONF ]]; then
+  mkdir -p "$(dirname "$CONF")"
+  cat > "$CONF" <<'CFG'
+HOST=omarchy                 # Tailscale MagicDNS name or 100.x IP of the host
+DESKTOP_RES=5760x1080        # `omarchy-stream monitors` on the host prints this
+MONITOR_RES=1920x1080        # per-monitor size for `multi`; one size, or one per port in MULTI_PORTS order ("1920x1080 3440x1440 1920x1080")
+FPS=60
+MAX_BITRATE_KBPS=60000       # ceiling; the path measurement scales it down
+CODEC=HEVC                   # HEVC or AV1 (AV1 needs an M3+ Mac and RTX 40+ GPU)
+MULTI_PORTS="48089 48189 48289"   # printed by `omarchy-stream multi setup`
+VIRTUAL_PORT=48989
+TOKEN=                       # host: cat ~/.config/omarchy-stream/token  (needed for `virtual`)
+DASHBOARD_PORT=8080
+CFG
+  chmod 600 "$CONF"
+  echo "Created $CONF - edit HOST/DESKTOP_RES (and TOKEN for virtual), then rerun."; exit 0
+fi
+# shellcheck disable=SC1090
+source "$CONF"
+
+MOONLIGHT=${MOONLIGHT:-/Applications/Moonlight.app/Contents/MacOS/Moonlight}
+TS=$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)
+
+# Measure the path: direct vs relayed, median RTT, loss. Sets BITRATE (kbps) and prints why.
+measure() {
+  local out n_ok rtts median relayed=no factor=100
+  out=$("$TS" ping -c 10 --until-direct=false "$HOST" 2>&1 || true)
+  n_ok=$(grep -c '^pong' <<<"$out" || true)
+  grep -q 'via DERP' <<<"$out" && relayed=yes
+  rtts=$(grep -o 'in [0-9.]*ms' <<<"$out" | grep -o '[0-9.]*' | sort -n || true)
+  if [[ $n_ok -eq 0 ]]; then
+    echo "✘ $HOST unreachable over Tailscale. Is the host up and logged in?"; exit 1
+  fi
+  median=$(awk '{a[NR]=$1} END {print int(a[int((NR+1)/2)])}' <<<"$rtts")
+  local loss=$(( (10 - n_ok) * 10 ))
+  if   [[ $relayed == yes ]]; then factor=25
+  elif (( median > 60 || loss > 10 )); then factor=40
+  elif (( median > 25 || loss > 0 )); then factor=70
+  fi
+  BITRATE=$(( MAX_BITRATE_KBPS * factor / 100 ))
+  printf 'path: %s  rtt %sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
+    "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$loss" $(( BITRATE / 1000 )) "$factor"
+  if [[ $relayed == yes ]]; then
+    echo "  ⚠ relayed: enable UPnP on the host's router or forward UDP 41641 to the host for full quality"
+  fi
+}
+
+# Native pixel size of the Mac's main display, e.g. 3024x1964.
+mac_resolution() {
+  system_profiler SPDisplaysDataType 2>/dev/null \
+    | awk '/Resolution:/ {gsub(/ /,""); split($0,a,":"); split(a[2],r,/[^0-9x]/); print r[1]; exit}'
+}
+
+api() {  # POST to the host dashboard
+  curl -fsS -m "${2:-60}" -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT$1"
+}
+
+# Pair Moonlight with an instance once: Moonlight starts the request, the host submits the PIN.
+pair_once() {
+  local port=$1 mark="$HOME/.config/omarchy-stream/paired.$1" pin mp log
+  [[ -f $mark ]] && return 0
+  pin=$(printf '%04d' $((RANDOM % 10000)))
+  echo "Pairing with $HOST:$port (first time only) ..."
+  "$MOONLIGHT" pair "$HOST:$port" --pin "$pin" >/dev/null 2>&1 & mp=$!
+  if api "/api/pair/$port/$pin" >/dev/null && wait $mp; then
+    touch "$mark"; echo "  paired"; return 0
+  fi
+  kill $mp 2>/dev/null || true
+  # Older Moonlight without --pin: let it pick a PIN, read it from its output, submit that.
+  log=$(mktemp); "$MOONLIGHT" pair "$HOST:$port" >"$log" 2>&1 & mp=$!
+  for _ in $(seq 20); do pin=$(grep -oE '(^|[^0-9])[0-9]{4}([^0-9]|$)' "$log" | grep -oE '[0-9]{4}' | head -1); [[ -n $pin ]] && break; sleep 0.5; done
+  if [[ -n $pin ]] && api "/api/pair/$port/$pin" >/dev/null && wait $mp; then
+    rm -f "$log"; touch "$mark"; echo "  paired"; return 0
+  fi
+  kill $mp 2>/dev/null || true; rm -f "$log"
+  echo "  ✘ automatic pairing failed: in Moonlight, add $HOST:$port and pair by hand"; return 1
+}
+
+need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the setup one-liner from 'omarchy-stream mac')"; exit 1; }; }
+
+common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen)
+
+case "${1:-all}" in
+  check) measure ;;
+  all)
+    measure
+    [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
+    exec "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" ;;
+  virtual)
+    need_token
+    measure
+    res=$(mac_resolution); [[ -n $res ]] || { echo "Couldn't read this Mac's resolution"; exit 1; }
+    scale=1; [[ ${res%x*} -gt 2560 ]] && scale=2
+    echo "Creating ${res}@${FPS} (scale ${scale}) virtual display on $HOST ..."
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
+      "http://$HOST:$DASHBOARD_PORT/api/virtual/${res}@${FPS},${scale}" >/dev/null \
+      || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
+    sleep 2
+    pair_once "$VIRTUAL_PORT" || true
+    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
+    curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
+    echo "Virtual display removed." ;;
+  multi)
+    need_token
+    measure
+    echo "Starting one stream per monitor on $HOST ..."
+    api /api/multi/up >/dev/null || { echo "✘ host could not start the per-monitor streams"; exit 1; }
+    sleep 3
+    for port in $MULTI_PORTS; do pair_once "$port" || true; done
+    per=$(( BITRATE / $(wc -w <<<"$MULTI_PORTS") ))
+    read -ra sizes <<<"$MONITOR_RES"; i=0
+    for port in $MULTI_PORTS; do
+      res=${sizes[$i]:-${sizes[0]}}; i=$((i+1))
+      open -n -a Moonlight --args stream "$HOST:$port" Desktop --resolution "$res" \
+        --bitrate "$per" --fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode windowed
+      sleep "${LAUNCH_DELAY:-1}"
+    done
+    echo "Drag each Moonlight window to its Mac display." ;;
+  *) sed -n 2,9p "$0"; exit 1 ;;
+esac

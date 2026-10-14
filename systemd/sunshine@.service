@@ -1,0 +1,12 @@
+[Unit]
+Description=Sunshine stream for monitor %i
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=@SUNSHINE@ %h/.config/sunshine/instances/%i/sunshine.conf
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,837 @@
+#!/usr/bin/env python3
+"""omarchy-stream: Parsec-style remote hosting for Omarchy (Hyprland) on Sunshine.
+
+Subcommands:
+  doctor [--json]        Check everything that makes streaming bad, with fixes.
+  monitors               List Hyprland monitors and the combined desktop size.
+  multi setup|up|down    One Sunshine instance per monitor (one Moonlight window each).
+  virtual WxH[@HZ][,S]   Parsec-style virtual display sized to the client (or 'off').
+  hook connect|disconnect  Called by Sunshine: VRR off while streaming, lock on disconnect.
+  mac                    Print the one-line Mac setup command.
+  serve                  Run the dashboard/API (Tailscale + localhost only, token auth).
+
+Standard library only. Linux host side.
+"""
+
+import argparse
+import base64
+import hmac
+import json
+import os
+import re
+import secrets
+import shutil
+import ssl
+import subprocess
+import sys
+import time
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+HOME = Path.home()
+SUNSHINE_DIR = HOME / ".config/sunshine"
+SUNSHINE_CONF = SUNSHINE_DIR / "sunshine.conf"
+SUNSHINE_LOG = SUNSHINE_DIR / "sunshine.log"
+INSTANCES_DIR = SUNSHINE_DIR / "instances"
+STATE_DIR = HOME / ".config/omarchy-stream"
+TOKEN_FILE = STATE_DIR / "token"
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_FILE = STATE_DIR / "config.json"
+SESSION_FILE = STATE_DIR / "session.json"
+DEFAULT_CONFIG = {
+    "disable_vrr_while_streaming": True,   # VRR makes captured frame timing uneven
+    "lock_on_disconnect": True,            # don't leave the desktop open at home
+    "sunshine_unit": "sunshine",           # user unit of the main (all-monitors) Sunshine; install.sh detects it
+    "sunshine_bin": "",                    # Sunshine binary that unit runs; empty = first on PATH
+    "dashboard_port": 8080,
+}
+
+
+def load_config():
+    cfg = dict(DEFAULT_CONFIG)
+    try:
+        cfg.update(json.loads(CONFIG_FILE.read_text()))
+    except (OSError, json.JSONDecodeError):
+        pass
+    return cfg
+
+
+def main_unit():
+    return load_config()["sunshine_unit"]
+
+
+def sunshine_bin():
+    return load_config()["sunshine_bin"] or shutil.which("sunshine") or "sunshine"
+
+
+# Seconds to let Hyprland settle (hotplug scripts may `hyprctl reload` right after an output appears).
+SETTLE = float(os.environ.get("OMARCHY_SETTLE", "1"))
+
+# Sunshine options that only exist on Windows; on Linux they are silently ignored.
+WINDOWS_ONLY_KEYS = {
+    "nvenc_realtime_hags": "Hardware GPU scheduling is a Windows feature.",
+    "nvenc_latency_over_power": "Windows-only NVENC power setting.",
+}
+
+# Each instance uses ports base-5 .. base+21, so 100 apart never overlap.
+BASE_PORT = 47989
+PORT_STEP = 100
+
+
+def run(args, timeout=5):
+    """Run a command without a shell. Returns (stdout, returncode)."""
+    try:
+        r = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
+        return r.stdout.strip(), r.returncode
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return str(e), 127
+
+
+def read_conf(path):
+    conf = {}
+    try:
+        for line in Path(path).read_text().splitlines():
+            line = line.split("#", 1)[0].strip()
+            if "=" in line:
+                k, v = line.split("=", 1)
+                conf[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return conf
+
+
+# --------------------------------------------------------------------------- monitors
+
+def hypr_monitors():
+    out, code = run(["hyprctl", "monitors", "-j"])
+    if code != 0:
+        return []
+    try:
+        mons = json.loads(out)
+    except json.JSONDecodeError:
+        return []
+    return sorted(mons, key=lambda m: (m.get("x", 0), m.get("y", 0)))
+
+
+def desktop_size(mons):
+    if not mons:
+        return None
+    def scaled(m, k):
+        return round(m[k] / (m.get("scale") or 1))
+    right = max(m["x"] + scaled(m, "width") for m in mons)
+    bottom = max(m["y"] + scaled(m, "height") for m in mons)
+    left = min(m["x"] for m in mons)
+    top = min(m["y"] for m in mons)
+    return right - left, bottom - top
+
+
+def cmd_monitors(_args):
+    mons = hypr_monitors()
+    if not mons:
+        print("No monitors from hyprctl (is Hyprland running in this session?)")
+        return 1
+    for i, m in enumerate(mons):
+        print(f"[{i}] {m['name']:<10} {m['width']}x{m['height']}@{m['refreshRate']:.0f}Hz"
+              f"  pos {m['x']},{m['y']}  scale {m.get('scale', 1)}  {m.get('description', '')}")
+    w, h = desktop_size(mons)
+    print(f"\nCombined desktop: {w}x{h}  ->  use this as Moonlight's custom resolution"
+          " for the all-monitors stream.")
+    return 0
+
+
+# --------------------------------------------------------------------------- doctor
+
+def check(name, status, detail, fix=None):
+    return {"check": name, "status": status, "detail": detail, "fix": fix}
+
+
+def tailscale_peers():
+    out, code = run(["tailscale", "status", "--json"])
+    if code != 0:
+        return None, []
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None, []
+    peers = []
+    for p in (data.get("Peer") or {}).values():
+        peers.append({
+            "name": p.get("HostName"),
+            "os": p.get("OS"),
+            "online": bool(p.get("Online")),
+            # Idle peers have no CurAddr either; only an active peer's path means anything.
+            "active": bool(p.get("Active")),
+            "ip": (p.get("TailscaleIPs") or [None])[0],
+            # CurAddr set = direct UDP path; otherwise traffic goes through a DERP relay.
+            "direct": bool(p.get("CurAddr")),
+            "endpoint": p.get("CurAddr") or None,
+            "relay": p.get("Relay") or None,
+        })
+    return data, peers
+
+
+def detect_encoder():
+    try:
+        log = SUNSHINE_LOG.read_text(errors="replace")[-200_000:]
+    except OSError:
+        return None
+    found = re.findall(r"Found (?:H\.264|HEVC|AV1) encoder: (\S+) \[(\w+)\]", log)
+    if found:
+        return sorted({f"{codec} [{kind}]" for codec, kind in found})
+    if re.search(r"software encoder|libx264|libx265", log, re.I):
+        return ["software"]
+    return None
+
+
+def cmd_doctor_results():
+    results = []
+
+    session = os.environ.get("XDG_SESSION_TYPE", "unknown")
+    hypr = bool(os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"))
+    results.append(check("session", "ok" if hypr else "warn",
+                         f"{session}, Hyprland={'yes' if hypr else 'no'}",
+                         None if hypr else "Run doctor from inside your Hyprland session."))
+
+    sunshine = load_config()["sunshine_bin"] or shutil.which("sunshine")
+    if not sunshine:
+        results.append(check("sunshine", "fail", "sunshine not installed",
+                             "yay -S sunshine   (or: sunshine-bin)"))
+    else:
+        real = os.path.realpath(sunshine)
+        caps, _ = run(["getcap", real])
+        ok = "cap_sys_admin" in caps
+        results.append(check("kms-capability", "ok" if ok else "fail",
+                             caps or f"{real} has no capabilities",
+                             None if ok else f"sudo setcap cap_sys_admin+p {real}   (needed for KMS capture; redo after every Sunshine update)"))
+
+        unit = main_unit()
+        state = service_state(unit)
+        results.append(check("sunshine-unit", "ok" if state == "active" else "warn", f"{unit}.service is {state}",
+                             None if state == "active" else
+                             f"systemctl --user enable --now {unit}   (or set sunshine_unit in {CONFIG_FILE})"))
+
+    conf = read_conf(SUNSHINE_CONF)
+    cap = conf.get("capture", "(auto)")
+    results.append(check("capture-method", "ok" if cap == "kms" else "warn", f"capture = {cap}",
+                         None if cap == "kms" else f"Set 'capture = kms' in {SUNSHINE_CONF} (wlroots capture stutters more on Hyprland)."))
+
+    dead = [k for k in WINDOWS_ONLY_KEYS if k in conf]
+    results.append(check("dead-settings", "warn" if dead else "ok",
+                         ", ".join(f"{k}: {WINDOWS_ONLY_KEYS[k]}" for k in dead) or "none",
+                         f"Remove {', '.join(dead)} from sunshine.conf." if dead else None))
+    mft = conf.get("minimum_fps_target")
+    if mft and mft.isdigit() and int(mft) < 30:
+        results.append(check("minimum-fps", "warn", f"minimum_fps_target = {mft}",
+                             "Remove it; a low floor lets the stream idle down and makes the mouse feel laggy."))
+
+    if "omarchy-stream hook" not in conf.get("global_prep_cmd", ""):
+        results.append(check("session-hooks", "warn", "Sunshine doesn't call omarchy-stream on connect/disconnect",
+                             "Rerun ./install.sh (adds global_prep_cmd: VRR off while streaming, lock on disconnect)."))
+    else:
+        results.append(check("session-hooks", "ok", "VRR off while streaming, lock on disconnect (see ~/.config/omarchy-stream/config.json)"))
+
+    enc = detect_encoder()
+    if enc is None:
+        results.append(check("encoder", "warn", "no encoder line in sunshine.log yet",
+                             "Start a stream once, then rerun doctor."))
+    else:
+        sw = enc == ["software"]
+        results.append(check("encoder", "fail" if sw else "ok", ", ".join(enc),
+                             "Sunshine fell back to software encoding: check GPU drivers (nvidia-utils / libva) and 'encoder = nvenc|vaapi'." if sw else None))
+
+    uinput = Path("/dev/uinput")
+    can = uinput.exists() and os.access(uinput, os.W_OK)
+    results.append(check("input", "ok" if can else "fail",
+                         "/dev/uinput writable" if can else "/dev/uinput not writable: remote mouse/keyboard/gamepads won't work",
+                         None if can else "Install Sunshine's udev rule (60-sunshine.rules), add yourself to the 'input' group, re-login."))
+
+    out, code = run(["ip", "-j", "route", "show", "default"])
+    if code == 0:
+        try:
+            routes = json.loads(out)
+        except json.JSONDecodeError:
+            routes = []
+        metrics = [r.get("metric", 0) for r in routes]
+        devs = [r.get("dev") for r in routes]
+        if len(routes) > 1 and len(set(metrics)) < len(metrics):
+            results.append(check("routing", "fail",
+                                 f"{len(routes)} default routes with equal metric ({', '.join(devs)}) - a likely cause of Moonlight 'Error -1' disconnects",
+                                 "Keep Wi-Fi on but make Ethernet preferred: nmcli connection modify <wifi-connection> ipv4.route-metric 600 ipv6.route-metric 600"))
+        else:
+            results.append(check("routing", "ok", ", ".join(f"{d} (metric {m})" for d, m in zip(devs, metrics, strict=True)) or "no default route"))
+
+    data, peers = tailscale_peers()
+    if data is None:
+        results.append(check("tailscale", "warn", "tailscale not running", "sudo systemctl enable --now tailscaled && sudo tailscale up"))
+    else:
+        online = [p for p in peers if p["online"]]
+        if not online:
+            results.append(check("tailscale", "warn", "no peers online", "Connect the client (Mac) to your tailnet."))
+        idle = [p for p in online if not p["active"]]
+        if idle:
+            results.append(check("tailscale-idle", "ok", f"{len(idle)} online peer(s) idle; their path is only known once traffic flows"))
+        if online and len(idle) == len(online):
+            results.append(check("tailscale-path", "warn", "no peer is talking to this host right now",
+                                 "Start a stream (or tailscale ping this host) from the Mac, then rerun doctor."))
+        for p in online:
+            if not p["active"]:
+                continue
+            if p["direct"]:
+                results.append(check(f"path:{p['name']}", "ok", f"direct via {p['endpoint']}"))
+            else:
+                results.append(check(f"path:{p['name']}", "fail",
+                                     f"relayed through DERP '{p['relay']}' - caps bandwidth, adds latency, drops packets",
+                                     f"From the client run: tailscale ping {p['ip']}. If it stays on DERP, enable UPnP on the host's router or forward UDP 41641 to this machine."))
+
+    out, code = run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"])
+    if code == 0 and out:
+        results.append(check("gpu", "ok", out))
+    return results
+
+
+def cmd_doctor(args):
+    results = cmd_doctor_results()
+    if args.json:
+        print(json.dumps(results, indent=2))
+    else:
+        icon = {"ok": "\033[32m✔\033[0m", "warn": "\033[33m!\033[0m", "fail": "\033[31m✘\033[0m"}
+        for r in results:
+            print(f"{icon[r['status']]} {r['check']:<22} {r['detail']}")
+            if r["fix"]:
+                print(f"    fix: {r['fix']}")
+    return 1 if any(r["status"] == "fail" for r in results) else 0
+
+
+# --------------------------------------------------------------------------- multi-instance
+
+def instance_names():
+    if not INSTANCES_DIR.is_dir():
+        return []
+    confs = [p for p in INSTANCES_DIR.iterdir() if (p / "sunshine.conf").is_file()]
+    # Port order = left-to-right monitor order from `multi setup`.
+    return [p.name for p in sorted(confs, key=lambda p: int(read_conf(p / "sunshine.conf").get("port", 0)))]
+
+
+def kms_indexes(names):
+    """Sunshine's KMS output_name is an index in CRTC order, which follows DRM connector ids
+    (verified on an RTX 3070: DP-1 823, HDMI-A-2 834, DP-3 837 -> 0, 1, 2), not screen position."""
+    root = Path(os.environ.get("DRM_SYSFS", "/sys/class/drm"))
+    ids = {}
+    for n in names:
+        for f in root.glob(f"card*-{n}/connector_id"):
+            try:
+                ids[n] = int(f.read_text())
+            except (OSError, ValueError):
+                pass
+    if len(ids) != len(names):
+        return {n: i for i, n in enumerate(names)}  # fallback: left-to-right
+    return {n: i for i, n in enumerate(sorted(names, key=ids.get))}
+
+
+def cmd_multi(args):
+    if args.action == "setup":
+        mons = [x for x in hypr_monitors() if x["name"] != VIRTUAL_NAME]
+        if not mons:
+            print("No monitors from hyprctl.")
+            return 1
+        base = read_conf(SUNSHINE_CONF)
+        keep = {k: v for k, v in base.items()
+                if k not in WINDOWS_ONLY_KEYS and k not in
+                {"port", "output_name", "sunshine_name", "minimum_fps_target", "file_state", "credentials_file",
+                 "log_path", "file_apps", "pkey", "cert"}}
+        keep.setdefault("capture", "kms")
+        host = os.uname().nodename
+        kms = kms_indexes([m["name"] for m in mons])
+        for i, m in enumerate(mons):
+            d = INSTANCES_DIR / m["name"]
+            d.mkdir(parents=True, exist_ok=True)
+            conf = dict(keep)
+            conf.update({
+                "sunshine_name": f"{host}-{m['name']}",
+                "port": str(BASE_PORT + PORT_STEP * (i + 1)),
+                # KMS capture selects monitors by index in DRM connector order.
+                "output_name": str(kms[m["name"]]),
+                "file_state": str(d / "sunshine_state.json"),
+                "credentials_file": str(d / "sunshine_state.json"),
+                "file_apps": str(d / "apps.json"),
+                "log_path": str(d / "sunshine.log"),
+                "pkey": str(d / "credentials/cakey.pem"),
+                "cert": str(d / "credentials/cacert.pem"),
+            })
+            target = d / "sunshine.conf"
+            if target.exists():
+                shutil.copy2(target, target.with_suffix(f".conf.bak.{int(time.time())}"))
+            target.write_text("".join(f"{k} = {v}\n" for k, v in conf.items()))
+            if not (d / "apps.json").exists():
+                (d / "apps.json").write_text(json.dumps({"env": {}, "apps": [{"name": "Desktop", "image-path": "desktop.png"}]}, indent=2))
+            ensure_webcreds(d)
+            print(f"{m['name']:<10} port {conf['port']}  output_name {conf['output_name']}  -> {target}")
+        print("\nCheck the 'Monitor N is ...' lines in each instance log after 'multi up';"
+              " if a monitor index doesn't match, edit output_name in that instance's sunshine.conf."
+              "\nEach instance pairs separately (web UI at https://localhost:<port+1>).")
+        return 0
+
+    names = [n for n in instance_names() if n != "virtual"]
+    if not names:
+        print("No instances. Run: omarchy-stream multi setup")
+        return 1
+    verb = {"up": "start", "down": "stop"}[args.action]
+    if args.action == "up":
+        run(["systemctl", "--user", "stop", main_unit()])  # single-stream instance would grab the default ports
+    rc = 0
+    for n in names:
+        if args.action == "up":
+            ensure_webcreds(INSTANCES_DIR / n)
+        _, code = run(["systemctl", "--user", verb, f"sunshine@{n}"], timeout=20)
+        print(f"{verb} sunshine@{n}: {'ok' if code == 0 else 'failed'}")
+        rc |= code
+    if args.action == "down":
+        _, code = run(["systemctl", "--user", "start", main_unit()], timeout=20)
+        print(f"start {main_unit()}: {'ok' if code == 0 else 'failed'}")
+    return 1 if rc else 0
+
+
+# --------------------------------------------------------------------------- pairing
+
+def ensure_webcreds(d):
+    """Give an instance its own web-UI login so pairing PINs can be submitted for it."""
+    f = d / "webcreds"
+    if f.exists():
+        return True
+    pw = secrets.token_urlsafe(18)
+    # `--creds` writes the login into the instance's state file and exits; pairings are kept.
+    _, code = run([sunshine_bin(), str(d / "sunshine.conf"), "--creds", "omarchy", pw], timeout=30)
+    if code != 0:
+        return False
+    f.write_text(pw)
+    f.chmod(0o600)
+    return True
+
+
+def instance_by_port(port):
+    for n in instance_names():
+        if read_conf(INSTANCES_DIR / n / "sunshine.conf").get("port") == str(port):
+            return n
+    return None
+
+
+def sunshine_api(port, method, path, pw, body=None):
+    scheme = os.environ.get("OMARCHY_SUNSHINE_SCHEME", "https")
+    req = urllib.request.Request(f"{scheme}://127.0.0.1:{port}{path}", method=method,
+                                 data=json.dumps(body).encode() if body is not None else None)
+    req.add_header("Authorization", "Basic " + base64.b64encode(f"omarchy:{pw}".encode()).decode())
+    if body is not None:
+        req.add_header("Content-Type", "application/json")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # Sunshine's own self-signed cert on localhost
+    with urllib.request.urlopen(req, timeout=5, context=ctx) as r:
+        return json.loads(r.read() or b"{}")
+
+
+def pair_instance(port, pin, device="Mac", wait=20):
+    """Submit a PIN for the pairing request a Moonlight client just started against an instance."""
+    name = instance_by_port(port)
+    if not name:
+        return False, f"no instance on port {port}"
+    d = INSTANCES_DIR / name
+    if not ensure_webcreds(d):
+        return False, "could not set web credentials for this instance"
+    pw = (d / "webcreds").read_text().strip()
+    web = int(port) + 1
+    deadline = time.time() + wait
+    while True:
+        try:
+            pending = sunshine_api(web, "GET", "/api/pin", pw).get("pairings") or []
+        except (OSError, ValueError) as e:
+            pending, err = [], str(e)
+        else:
+            err = "no pairing request arrived"
+        if pending:
+            res = sunshine_api(web, "POST", "/api/pin", pw,
+                               {"pairing_id": pending[-1]["id"], "pin": pin, "name": device})
+            return bool(res.get("status")), res.get("error") or "paired"
+        if time.time() > deadline:
+            return False, err
+        time.sleep(0.5)
+
+
+# --------------------------------------------------------------------------- session hooks
+
+VIRTUAL_NAME = "OS-VIRTUAL"
+VIRTUAL_PORT = BASE_PORT + PORT_STEP * 10
+
+
+def ensure_hypr_env():
+    """Sunshine runs hooks from a systemd user service, which may lack
+    HYPRLAND_INSTANCE_SIGNATURE. Recover it from the runtime socket dir."""
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return True
+    runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")) / "hypr"
+    socks = sorted(runtime.glob("*/.socket.sock"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not socks:
+        return False
+    os.environ["HYPRLAND_INSTANCE_SIGNATURE"] = socks[0].parent.name
+    os.environ.setdefault("XDG_RUNTIME_DIR", str(runtime.parent))
+    return True
+
+
+def hypr_option(name):
+    out, code = run(["hyprctl", "getoption", name, "-j"])
+    if code != 0:
+        return None
+    try:
+        return json.loads(out).get("int")
+    except json.JSONDecodeError:
+        return None
+
+
+def cmd_hook(args):
+    """Called by Sunshine's global_prep_cmd on every stream start/stop."""
+    cfg = load_config()
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if not ensure_hypr_env():
+        print("hook: Hyprland not found; nothing to do", file=sys.stderr)
+        return 0  # never block a stream because of a hook
+    if args.event == "connect":
+        state = {"started": time.time()}
+        if cfg["disable_vrr_while_streaming"]:
+            vrr = hypr_option("misc:vrr")
+            if vrr:
+                state["vrr"] = vrr
+                run(["hyprctl", "keyword", "misc:vrr", "0"])
+        SESSION_FILE.write_text(json.dumps(state))
+        return 0
+    try:
+        state = json.loads(SESSION_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    if state.get("vrr"):
+        run(["hyprctl", "keyword", "misc:vrr", str(state["vrr"])])
+    SESSION_FILE.unlink(missing_ok=True)
+    if cfg["lock_on_disconnect"]:
+        run(["loginctl", "lock-session"])
+    return 0
+
+
+# --------------------------------------------------------------------------- virtual display
+
+def set_output_mode(name, w, h, hz, scale):
+    """Hyprland with a Lua config (0.5x+) rejects `keyword` and wants `eval`; older ones lack `eval`.
+    Values are regex-validated digits, so the Lua string can't be injected into."""
+    lua = f'hl.monitor({{ output = "{name}", mode = "{w}x{h}@{hz}", position = "auto", scale = {scale} }})'
+    for _ in range(4):
+        out, code = run(["hyprctl", "keyword", "monitor", f"{name},{w}x{h}@{hz},auto,{scale}"])
+        if code != 0 or "eval" in out:
+            run(["hyprctl", "eval", lua])
+        time.sleep(SETTLE)
+        m = next((x for x in hypr_monitors() if x["name"] == name), None)
+        if m and (m["width"], m["height"]) == (int(w), int(h)):
+            return True
+    return False
+
+
+def cmd_virtual(args):
+    """Parsec-style virtual display: a headless Hyprland output sized to the client."""
+    d = INSTANCES_DIR / "virtual"
+    ensure_hypr_env()
+    if args.spec == "off":
+        run(["systemctl", "--user", "stop", "sunshine@virtual"], timeout=20)
+        run(["hyprctl", "output", "remove", VIRTUAL_NAME])
+        print("virtual display removed")
+        return 0
+    m = re.fullmatch(r"(\d{3,5})x(\d{3,5})(?:@(\d{2,3}))?(?:,([\d.]+))?", args.spec)
+    if not m:
+        print("usage: omarchy-stream virtual WIDTHxHEIGHT[@HZ][,SCALE] | off   e.g. 3024x1964@60,2")
+        return 2
+    w, h, hz, scale = m.group(1), m.group(2), m.group(3) or "60", m.group(4) or "1"
+    if not any(x["name"] == VIRTUAL_NAME for x in hypr_monitors()):
+        _, code = run(["hyprctl", "output", "create", "headless", VIRTUAL_NAME])
+        if code != 0:
+            print("hyprctl could not create a headless output (needs Hyprland >= 0.41)")
+            return 1
+        time.sleep(2 * SETTLE)  # let hotplug-triggered `hyprctl reload`s pass before setting the mode
+    if not set_output_mode(VIRTUAL_NAME, w, h, hz, scale):
+        print(f"warning: {VIRTUAL_NAME} did not take mode {w}x{h}; check `hyprctl monitors`")
+    d.mkdir(parents=True, exist_ok=True)
+    base = {k: v for k, v in read_conf(SUNSHINE_CONF).items()
+            if k not in WINDOWS_ONLY_KEYS and k != "minimum_fps_target"}
+    base.update({
+        "sunshine_name": f"{os.uname().nodename}-virtual",
+        "port": str(VIRTUAL_PORT),
+        # KMS only sees physical connectors; a headless output needs wlroots capture.
+        "capture": "wlr",
+        "output_name": VIRTUAL_NAME,
+        "file_state": str(d / "sunshine_state.json"),
+        "credentials_file": str(d / "sunshine_state.json"),
+        "file_apps": str(d / "apps.json"),
+        "log_path": str(d / "sunshine.log"),
+        "pkey": str(d / "credentials/cakey.pem"),
+        "cert": str(d / "credentials/cacert.pem"),
+    })
+    (d / "sunshine.conf").write_text("".join(f"{k} = {v}\n" for k, v in base.items()))
+    if not (d / "apps.json").exists():
+        (d / "apps.json").write_text(json.dumps({"env": {}, "apps": [{"name": "Desktop"}]}, indent=2))
+    ensure_webcreds(d)
+    _, code = run(["systemctl", "--user", "restart", "sunshine@virtual"], timeout=20)
+    print(f"virtual display {w}x{h}@{hz} scale {scale} on port {VIRTUAL_PORT}"
+          f" ({'running' if code == 0 else 'failed to start sunshine@virtual'})")
+    print(f"Move a workspace onto it: hyprctl dispatch moveworkspacetomonitor <n> {VIRTUAL_NAME}")
+    return 0 if code == 0 else 1
+
+
+# --------------------------------------------------------------------------- dashboard server
+
+def load_token():
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    if not TOKEN_FILE.exists():
+        TOKEN_FILE.write_text(secrets.token_urlsafe(24))
+        TOKEN_FILE.chmod(0o600)
+    return TOKEN_FILE.read_text().strip()
+
+
+def system_stats():
+    def cpu_times():
+        f = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
+        v = list(map(int, f))
+        return v[3] + v[4], sum(v)
+    i1, t1 = cpu_times(); time.sleep(0.1); i2, t2 = cpu_times()
+    cpu = 100 * (1 - (i2 - i1) / max(1, t2 - t1))
+    mem = {l.split(":")[0]: int(l.split()[1]) for l in Path("/proc/meminfo").read_text().splitlines()}
+    memp = 100 * (1 - mem["MemAvailable"] / mem["MemTotal"])
+    gpu = None
+    out, code = run(["nvidia-smi", "--query-gpu=utilization.gpu,utilization.encoder,temperature.gpu",
+                     "--format=csv,noheader,nounits"])
+    if code == 0 and out:
+        try:
+            u, e, t = [x.strip() for x in out.splitlines()[0].split(",")]
+            gpu = {"util": int(u), "encoder": int(e), "temp": int(t)}
+        except ValueError:
+            pass
+    return {"cpu": round(cpu, 1), "memory": round(memp, 1), "gpu": gpu}
+
+
+def service_state(unit):
+    out, _ = run(["systemctl", "--user", "is-active", unit])
+    return out or "unknown"
+
+
+def status():
+    instances = instance_names()
+    mons = hypr_monitors()
+    data, peers = tailscale_peers()
+    self_ip = None
+    if data:
+        self_ip = ((data.get("Self") or {}).get("TailscaleIPs") or [None])[0]
+    return {
+        "host": os.uname().nodename,
+        "tailscale": {"running": bool(data and data.get("BackendState") == "Running"),
+                      "ip": self_ip, "peers": peers},
+        "streams": [{"name": "all-monitors", "unit": main_unit(), "port": BASE_PORT,
+                     "state": service_state(main_unit())}] +
+                   [{"name": n, "unit": f"sunshine@{n}",
+                     "port": int(read_conf(INSTANCES_DIR / n / "sunshine.conf").get("port", 0)),
+                     "state": service_state(f"sunshine@{n}")} for n in instances],
+        "monitors": [{"name": m["name"], "size": f"{m['width']}x{m['height']}",
+                      "hz": round(m["refreshRate"])} for m in mons],
+        "desktop": "x".join(map(str, desktop_size(mons) or ())),
+        "system": system_stats(),
+    }
+
+
+def mac_client_env(token, dash_port):
+    """client.env for the Mac, filled in from this host."""
+    data, _ = tailscale_peers()
+    ip = data and ((data.get("Self") or {}).get("TailscaleIPs") or [None])[0]
+    mons = [m for m in hypr_monitors() if m["name"] != VIRTUAL_NAME]
+    size = {m["name"]: f"{m['width']}x{m['height']}" for m in mons}
+    kms = kms_indexes([m["name"] for m in mons])
+    main = next((n for n, i in kms.items() if i == 0), None)  # the single stream captures KMS index 0
+    names = [n for n in instance_names() if n != "virtual"] or [m["name"] for m in mons]
+    ports = [int(read_conf(INSTANCES_DIR / n / "sunshine.conf").get("port", 0)) or BASE_PORT + PORT_STEP * (i + 1)
+             for i, n in enumerate(names)]
+    return "".join(f"{k}={v}\n" for k, v in {
+        "HOST": ip or os.uname().nodename,
+        "DESKTOP_RES": size.get(main, "1920x1080"),
+        "MONITOR_RES": '"' + " ".join(size.get(n, "1920x1080") for n in names) + '"',
+        "FPS": 60,
+        "MAX_BITRATE_KBPS": 60000,
+        "CODEC": "HEVC",
+        "MULTI_PORTS": '"' + " ".join(map(str, ports)) + '"',
+        "VIRTUAL_PORT": VIRTUAL_PORT,
+        "TOKEN": token,
+        "DASHBOARD_PORT": dash_port,
+    }.items())
+
+
+def mac_setup_script(token, dash_port):
+    client = (APP_DIR / "mac/omarchy-connect").read_text()
+    return f"""#!/bin/bash
+# omarchy-stream Mac setup, generated by {os.uname().nodename}. Safe to rerun.
+set -euo pipefail
+dest=
+for d in /opt/homebrew/bin /usr/local/bin; do [ -d "$d" ] && [ -w "$d" ] && {{ dest=$d; break; }}; done
+[ -n "$dest" ] || {{ dest="$HOME/.local/bin"; mkdir -p "$dest"; }}
+cat > "$dest/omarchy-connect" <<'OMARCHY_CONNECT_EOF'
+{client}OMARCHY_CONNECT_EOF
+chmod +x "$dest/omarchy-connect"
+conf="$HOME/.config/omarchy-stream/client.env"
+mkdir -p "$(dirname "$conf")"
+[ -f "$conf" ] && cp "$conf" "$conf.bak.$(date +%s)"
+cat > "$conf" <<'OMARCHY_ENV_EOF'
+{mac_client_env(token, dash_port)}OMARCHY_ENV_EOF
+chmod 600 "$conf"
+if [ ! -d /Applications/Moonlight.app ]; then
+  if command -v brew >/dev/null; then brew install --cask moonlight
+  else echo "Install Moonlight first: https://moonlight-stream.org"; fi
+fi
+echo "Installed $dest/omarchy-connect and $conf"
+case ":$PATH:" in *":$dest:"*) ;; *) echo "Add to PATH: export PATH=\\"$dest:\\$PATH\\"";; esac
+echo
+echo "  omarchy-connect virtual   a screen sized to this Mac (recommended)"
+echo "  omarchy-connect multi     one window per host monitor"
+echo "  omarchy-connect           the main monitor"
+echo "Pairing happens automatically the first time."
+"""
+
+
+def make_handler(token):
+    index = (APP_DIR / "dashboard/index.html").read_bytes()
+    allowed_units = lambda: {main_unit()} | {f"sunshine@{n}" for n in instance_names()}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def send(self, code, body, ctype="application/json"):
+            if not isinstance(body, bytes):
+                body = json.dumps(body).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def authed(self):
+            got = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+            return hmac.compare_digest(got, token)
+
+        def do_GET(self):
+            if self.path in ("/", "/index.html"):
+                return self.send(200, index, "text/html; charset=utf-8")
+            if self.path == "/api/ping":
+                return self.send(200, {"ok": True})
+            if not self.authed():
+                return self.send(401, {"error": "token required"})
+            if self.path == "/api/status":
+                return self.send(200, status())
+            if self.path == "/api/doctor":
+                return self.send(200, cmd_doctor_results())
+            if self.path == "/mac/setup":
+                port = self.server.server_address[1]
+                return self.send(200, mac_setup_script(token, port).encode(), "text/x-shellscript")
+            self.send(404, {"error": "not found"})
+
+        def do_POST(self):
+            if not self.authed():
+                return self.send(401, {"error": "token required"})
+            m = re.fullmatch(r"/api/stream/([\w@.-]+)/(start|stop|restart)", self.path)
+            if m:
+                unit, action = m.groups()
+                if unit not in allowed_units():
+                    return self.send(400, {"error": f"unknown stream {unit}"})
+                main = main_unit()
+                if action == "start" and unit == main:
+                    for n in instance_names():
+                        run(["systemctl", "--user", "stop", f"sunshine@{n}"])
+                if action == "start" and unit != main:
+                    run(["systemctl", "--user", "stop", main])
+                _, code = run(["systemctl", "--user", action, unit], timeout=20)
+                return self.send(200 if code == 0 else 500, {"ok": code == 0, "unit": unit, "action": action})
+            m = re.fullmatch(r"/api/virtual/(off|\d{3,5}x\d{3,5}(?:@\d{2,3})?(?:,[\d.]+)?)", self.path)
+            if m:
+                import io
+                from contextlib import redirect_stdout
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    code = cmd_virtual(argparse.Namespace(spec=m.group(1)))
+                return self.send(200 if code == 0 else 500, {"ok": code == 0, "message": buf.getvalue().strip(),
+                                                              "port": VIRTUAL_PORT})
+            m = re.fullmatch(r"/api/pair/(\d{4,5})/(\d{4})", self.path)
+            if m:
+                ok, msg = pair_instance(int(m.group(1)), m.group(2))
+                return self.send(200 if ok else 500, {"ok": ok, "message": msg})
+            m = re.fullmatch(r"/api/multi/(up|down)", self.path)
+            if m:
+                import io
+                from contextlib import redirect_stdout
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    if m.group(1) == "up" and not [n for n in instance_names() if n != "virtual"]:
+                        cmd_multi(argparse.Namespace(action="setup"))
+                    code = cmd_multi(argparse.Namespace(action=m.group(1)))
+                return self.send(200 if code == 0 else 500, {"ok": code == 0, "message": buf.getvalue().strip()})
+            m = re.fullmatch(r"/api/workspace/(\d|next|prev)", self.path)
+            if m:
+                w = {"next": "+1", "prev": "-1"}.get(m.group(1), m.group(1))
+                _, code = run(["hyprctl", "dispatch", "workspace", w])
+                return self.send(200 if code == 0 else 500, {"ok": code == 0})
+            self.send(404, {"error": "not found"})
+
+    return H
+
+
+def cmd_serve(args):
+    ensure_hypr_env()  # the dashboard runs as a user service
+    token = load_token()
+    port = args.port or int(load_config()["dashboard_port"])
+    binds = ["127.0.0.1"]
+    if not args.local_only:
+        data, _ = tailscale_peers()
+        ip = data and ((data.get("Self") or {}).get("TailscaleIPs") or [None])[0]
+        if ip:
+            binds.append(ip)
+        else:
+            print("Tailscale IP not found; serving on localhost only.", file=sys.stderr)
+    import threading
+    servers = [ThreadingHTTPServer((b, port), make_handler(token)) for b in binds]
+    for s in servers[1:]:
+        threading.Thread(target=s.serve_forever, daemon=True).start()
+    print(f"Dashboard on {', '.join(f'http://{b}:{port}' for b in binds)}")
+    print(f"Token: {TOKEN_FILE}")
+    servers[0].serve_forever()
+
+
+def mac_oneliner():
+    cfg = load_config()
+    data, _ = tailscale_peers()
+    ip = data and ((data.get("Self") or {}).get("TailscaleIPs") or [None])[0]
+    return (f'curl -fsSL -H "Authorization: Bearer {load_token()}" '
+            f'http://{ip or os.uname().nodename}:{cfg["dashboard_port"]}/mac/setup | bash')
+
+
+def cmd_mac(_args):
+    print("Run this once in Terminal on the Mac (Tailscale must be connected):\n")
+    print("  " + mac_oneliner())
+    return 0
+
+
+def main():
+    p = argparse.ArgumentParser(prog="omarchy-stream", description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("doctor"); d.add_argument("--json", action="store_true"); d.set_defaults(fn=cmd_doctor)
+    sub.add_parser("monitors").set_defaults(fn=cmd_monitors)
+    m = sub.add_parser("multi"); m.add_argument("action", choices=["setup", "up", "down"]); m.set_defaults(fn=cmd_multi)
+    h = sub.add_parser("hook"); h.add_argument("event", choices=["connect", "disconnect"]); h.set_defaults(fn=cmd_hook)
+    v = sub.add_parser("virtual"); v.add_argument("spec"); v.set_defaults(fn=cmd_virtual)
+    sub.add_parser("mac", help="print the one-line Mac setup command").set_defaults(fn=cmd_mac)
+    s = sub.add_parser("serve"); s.add_argument("--port", type=int, help="default: dashboard_port in config.json (8080)")
+    s.add_argument("--local-only", action="store_true"); s.set_defaults(fn=cmd_serve)
+    a = p.parse_args()
+    sys.exit(a.fn(a) or 0)
+
+
+if __name__ == "__main__":
+    main()
