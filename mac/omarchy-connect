@@ -26,6 +26,7 @@ MULTI_PORTS="48089 48189 48289"   # printed by `omarchy-stream multi setup`
 VIRTUAL_PORT=48989
 TOKEN=                       # host: cat ~/.config/omarchy-stream/token  (needed for `virtual`)
 DASHBOARD_PORT=8080
+HOST_USER=                   # your username on the host; used by `rescue` when the dashboard is down
 CFG
   chmod 600 "$CONF"
   echo "Created $CONF - edit HOST/DESKTOP_RES (and TOKEN for virtual), then rerun."; exit 0
@@ -222,6 +223,39 @@ api() {  # POST to the host dashboard
   curl -fsS -m "${2:-60}" -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT$1"
 }
 
+# "Fix connection": get the host streaming again without anyone touching it.
+# Three rungs, each one working when the rung above is dead: the dashboard's own
+# API, then a shell over Tailscale SSH (no key needed), then plain ssh.
+rescue() {
+  local out
+  if out=$(api /api/rescue 20 2>/dev/null) && [[ $out == *'"ok": true'* ]]; then
+    echo "fixed: Sunshine restarted (dashboard answered)"
+    [[ $out == *'"hyprland": false'* ]] && echo "  ⚠ no desktop session on the PC: it has to be logged in at the machine"
+    notify "Sunshine restarted"; return 0
+  fi
+  echo "dashboard did not answer, going in over SSH ..."
+  local user=${HOST_USER:-$USER} ssh_out="" remote
+  # ~/.local/bin is not on PATH in a non-interactive SSH session, hence the full path.
+  remote='command -v omarchy-stream >/dev/null && exec omarchy-stream rescue; exec ~/.local/share/omarchy-stream/omarchy-stream rescue'
+  for how in tailscale plain; do
+    local -a ssh_cmd=(ssh)
+    if [[ $how == tailscale ]]; then
+      [[ -x $TS ]] || continue          # Tailscale SSH needs no key, so it goes first
+      ssh_cmd=("$TS" ssh)
+    fi
+    if ssh_out=$("${ssh_cmd[@]}" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 \
+                 "$user@$HOST" "$remote" 2>&1); then
+      echo "fixed over $how ssh:"; sed 's/^/  /' <<<"$ssh_out"
+      notify "Fixed over SSH"; return 0
+    fi
+  done
+  echo "✘ could not reach the PC at $HOST"
+  echo "  last error: $(tail -1 <<<"${ssh_out:-no output}")"
+  echo "  the PC is off, off the tailnet, or waiting at a login prompt"
+  notify "Could not reach the PC"
+  return 1
+}
+
 # Pair Moonlight with an instance once: Moonlight starts the request, the host submits the PIN.
 pair_once() {
   local port=$1 mark="$HOME/.config/omarchy-stream/paired.$1" pin mp log
@@ -271,6 +305,7 @@ common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullsc
 
 case "${1:-all}" in
   check) measure ;;
+  rescue) rescue ;;
   all)
     stamp start; measure; stamp measured
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running

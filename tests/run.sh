@@ -37,7 +37,11 @@ stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
 stub ip        'echo "[{\"dst\":\"default\",\"dev\":\"enp5s0\",\"metric\":100},{\"dst\":\"default\",\"dev\":\"wlan0\",\"metric\":100}]"'
-stub tailscale 'if [ "$1" = ping ]; then
+stub tailscale 'if [ "$1" = ssh ]; then
+  shift; echo "TSSSH $*" >> "$LOG"
+  [ -f "$STATE/sshfail" ] && exit 255
+  printf "dashboard: active\nsunshine: active\nhyprland: up\n"; exit 0; fi
+if [ "$1" = ping ]; then
   i=0; while [ $i -lt ${PINGS:-10} ]; do
     if [ -n "$RELAY" ]; then echo "pong from omarchy (100.73.206.17) via DERP(fra) in ${RTT:-48}ms"
     else r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
@@ -72,7 +76,9 @@ stub pbpaste   'cat "$STATE/macclip" 2>/dev/null'
 stub pbcopy    'cat > "$STATE/macclip"'
 stub open      'echo "OPEN $*" >> "$LOG"'
 stub system_profiler 'printf "Graphics/Displays:\n    Displays:\n        Color LCD:\n          Display Type: Built-in Liquid Retina XDR Display\n          Resolution: 3024 x 1964 Retina\n"'
-export PATH=$STUBS:$PATH MOONLIGHT=$STUBS/moonlight LAUNCH_DELAY=0
+# /usr/bin ahead of the caller's PATH: version managers (mise, asdf) put shims there that
+# refuse to run once these tests move HOME, and the suite must not depend on the host's setup.
+export PATH=$STUBS:/usr/bin:/bin:$PATH MOONLIGHT=$STUBS/moonlight LAUNCH_DELAY=0
 export HYPRLAND_INSTANCE_SIGNATURE=test XDG_SESSION_TYPE=wayland DRM_SYSFS=$WORK/nodrm OMARCHY_SETTLE=0
 
 new_home() { HOME=$(mktemp -d -p "$WORK"); export HOME; mkdir -p "$HOME/.config/sunshine" "$HOME/.config/hypr"; }
@@ -119,6 +125,11 @@ check "idle peers not flagged as relayed" '! grep -q "path:idle-box" <<<"$out" &
 check "sees hardware encoder"             'grep -q "hevc_nvenc \[nvenc\]" <<<"$out"'
 check "sees session hooks"                'grep -q "session-hooks.*VRR off" <<<"$out"'
 check "--json is valid JSON"              '{ "$CLI" doctor --json; true; } | python3 -c "import json,sys; json.load(sys.stdin)"'
+check "checks every way back in"          'for c in ssh tailscale-ssh linger stays-awake autologin "boots:omarchy-stream-dashboard"; do grep -q "$c" <<<"$out" || exit 1; done'
+check "warns when nothing logs TTY1 in"   'grep -q "autologin.*waits at a login prompt" <<<"$out"'
+: > "$LOG"; rescue_out=$("$CLI" rescue 2>&1)
+check "rescue restarts both services"     'grep -q "systemctl --user restart sunshine" "$LOG" && grep -q "systemctl --user restart omarchy-stream-dashboard" "$LOG"'
+check "rescue reports the session"        'grep -qE "hyprland: (up|DOWN)" <<<"$rescue_out"'
 
 # --------------------------------------------------------------------------- hooks
 section "session hooks"
@@ -246,6 +257,10 @@ check "audio pref stored"                 '[ "$(cat "$HOME/.config/omarchy-strea
 check "host audio: Sunshine copy muted"   'grep -q "pactl set-source-output-mute 7 1" "$LOG" && ! grep -q "mute 8" "$LOG"'
 curl -s -X POST "${A[@]}" localhost:$PORT/api/audio/mac >/dev/null; : > "$LOG"; OMARCHY_SETTLE=0.1 "$CLI" audio-apply
 check "Mac audio: Sunshine copy unmuted"  'grep -q "pactl set-source-output-mute 7 0" "$LOG"'
+: > "$LOG"; curl -s -X POST "${A[@]}" localhost:$PORT/api/rescue > "$WORK/rescue.json"
+check "rescue API restarts Sunshine"      'grep -q "systemctl --user restart sunshine" "$LOG" && grep -q "\"unit\": \"sunshine\"" "$WORK/rescue.json" && grep -q "\"hyprland\"" "$WORK/rescue.json"'
+check "rescue API keeps itself alive"     '! grep -q "restart omarchy-stream-dashboard" "$LOG"'
+check "rescue needs the token"            '[ "$(curl -s -o /dev/null -w %{http_code} -X POST localhost:$PORT/api/rescue)" = 401 ]'
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -255,6 +270,7 @@ check "mac setup installs the client"     'cmp -s "$MH/.local/bin/omarchy-connec
 APPB="$MH/Applications/Omarchy Remote.app"
 check "mac setup builds the app"          '[ -x "$APPB/Contents/MacOS/omarchy-remote" ] && cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],\"rb\")); assert d[\"CFBundleExecutable\"]==\"omarchy-remote\"" "$APPB/Contents/Info.plist"'
 check "mac setup adds AirDrop sudo rule"  'grep -q "sudo visudo -cf" "$LOG" && grep -q "sudo install -m 440 -o root -g wheel .* /etc/sudoers.d/omarchy-awdl" "$LOG"'
+check "client.env says who to SSH as"     'grep -q "^HOST_USER=$(id -un)$" "$ME"'
 check "mac setup fills client.env"        'grep -q "^HOST=100.73.206.17$" "$ME" && grep -q "^TOKEN=$TOK$" "$ME" && grep -q "^DASHBOARD_PORT=$PORT$" "$ME" && grep -q "^MULTI_PORTS=\"48089 48189 48289\"$" "$ME" && [ "$(stat -c %a "$ME")" = 600 ]'
 check "mac setup env is sourceable"       'bash -c "set -u; source \"$ME\"; [ \"\$MONITOR_RES\" = \"1920x1080 1920x1080 1920x1080\" ]"'
 check "omarchy-stream mac prints it"      '"$CLI" mac | grep -q "curl -fsSL -H \"Authorization: Bearer $TOK\" http://100.73.206.17:.*/mac/setup | bash"'
@@ -357,6 +373,7 @@ check "multi needs a token"               '! CLIPBOARD=0 "$MC" multi >/dev/null'
 sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
 export CONNECT_SRC=$ROOT/mac/omarchy-connect LAUNCHER_SRC=$ROOT/mac/app/omarchy-remote
 stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *api/clipboard*-X*|*-X*api/clipboard*) [ -f "$STATE/curlfail" ] && { rm -f "$STATE/curlfail"; exit 7; } ;; esac
+case "$*" in *api/rescue*) [ -f "$STATE/rescuefail" ] && exit 7; echo "{\"ok\": true, \"unit\": \"sunshine\", \"state\": \"active\", \"hyprland\": true}"; exit 0 ;; esac
 case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
 src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; *-X*) ;; *api/clipboard*) [ -f "$STATE/hostclip" ] && src=$STATE/hostclip ;; esac
 [ -n "$src" ] && while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$src" "$2"; shift; done; exit 0'
@@ -375,6 +392,16 @@ check "already paired: no pairing again"  '! grep -q "api/pair" "$LOG"'
 rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'
+# Fix connection: dashboard first, then a shell over Tailscale SSH, then plain ssh.
+stub ssh 'echo "SSH $*" >> "$LOG"; [ -f "$STATE/sshfail" ] && exit 255; echo "dashboard: active"; echo "sunshine: active"; echo "hyprland: up"'
+: > "$LOG"; out=$("$MC" rescue 2>&1)
+check "fix: dashboard does it alone"      'grep -q "fixed: Sunshine restarted" <<<"$out" && grep -q "CURL .*-X POST .*api/rescue" "$LOG" && ! grep -q "^SSH" "$LOG"'
+touch "$STATE/rescuefail"; : > "$LOG"; out=$("$MC" rescue 2>&1)
+check "fix: falls back to Tailscale SSH"  'grep -q "fixed over tailscale ssh" <<<"$out" && grep -q "TSSSH .*$(id -un)@omarchy .*omarchy-stream rescue" "$LOG" && grep -q "hyprland: up" <<<"$out"'
+touch "$STATE/sshfail"; : > "$LOG"; out=$("$MC" rescue 2>&1) || true
+check "fix: says when the PC is gone"     'grep -q "could not reach the PC" <<<"$out" && grep -q "^TSSSH" "$LOG" && grep -q "^SSH" "$LOG"'
+check "fix: a dead PC exits non-zero"     '! "$MC" rescue >/dev/null 2>&1'
+rm -f "$STATE/rescuefail" "$STATE/sshfail"
 section "Mac app (Omarchy Remote.app)"
 L2="$APPB/Contents/MacOS/omarchy-remote"
 echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
@@ -415,6 +442,8 @@ HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.8" "$L2"
 check "app: connect keeps Mac clipboard"  '[ "$(cat "$STATE/macclip")" = mine ]'; rm -f "$STATE/hostclip"
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 check "app: main monitor choice"          'grep -q "MOONLIGHT stream 100.73.206.17 Desktop --resolution" "$LOG"'
+: > "$LOG"; HOME=$MH CHOICE="Fix connection (restart the PC's streaming)" "$L2"
+check "app: fix connection is a click"    'grep -q "api/rescue" "$LOG" && grep -q "OSA -e display dialog .*Sunshine restarted" "$LOG" && ! grep -q MOONLIGHT "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE=false "$L2"
 check "app: cancel does nothing"          '! grep -q MOONLIGHT "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE="Check connection" PINGS=0 "$L2"

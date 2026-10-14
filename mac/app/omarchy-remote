@@ -25,18 +25,20 @@ fi
 
 export OMARCHY_T_MENU=$(date +%s)
 V="Screen sized to this Mac"; M="Main monitor (ultrawide)"; A="All three monitors"; C="Check connection"
+R="Fix connection (restart the PC's streaming)"
 while true; do
   # Settings toggles live in the same list; picking one flips it and shows the list again.
   CLIPBOARD=1; [[ -f $conf ]] && CLIPBOARD=$(grep -E '^CLIPBOARD=' "$conf" | tail -1 | cut -d= -f2); CLIPBOARD=${CLIPBOARD:-1}
   if [[ $CLIPBOARD == 1 ]]; then K="Clipboard sync: On (turn off)"; else K="Clipboard sync: Off (turn on)"; fi
   AUDIO=mac; [[ -f $conf ]] && AUDIO=$(grep -E '^AUDIO=' "$conf" | tail -1 | cut -d= -f2); AUDIO=${AUDIO:-mac}
   if [[ $AUDIO == host ]]; then S="Sound: Omarchy speakers (switch to Mac)"; else S="Sound: this Mac (switch to Omarchy)"; fi
-  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$S\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
+  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$R\", \"$S\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
   case "$choice" in
     "$V") mode=virtual; break ;;
     "$M") mode=all; break ;;
     "$A") mode=multi; break ;;
     "$C") mode=check; break ;;
+    "$R") mode=rescue; break ;;
     "$S") if [[ $AUDIO == host ]]; then new=mac; else new=host; fi
           if grep -q '^AUDIO=' "$conf"; then sed -i.bak "s/^AUDIO=.*/AUDIO=$new/" "$conf" && rm -f "$conf.bak"
           else echo "AUDIO=$new" >> "$conf"; fi ;;
@@ -58,4 +60,6 @@ if [[ $rc -ne 0 ]]; then
   osascript -e "display dialog \"${msg:-Something went wrong.}\n\nDetails: ~/Library/Logs/omarchy-remote.log\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null
 elif [[ $mode == check ]]; then
   osascript -e "display dialog \"${path:-No result}\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1" >/dev/null
+elif [[ $mode == rescue ]]; then
+  osascript -e "display dialog \"$(sed 's/"/\\"/g' <<<"$out" | tr '\n' '\r')\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1" >/dev/null
 fi

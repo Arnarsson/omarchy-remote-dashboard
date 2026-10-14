@@ -37,12 +37,18 @@ of Mac Wi-Fi lag spikes, is paused while you stream and restored afterwards.
 
 **Plug and play.** Pairing with Moonlight is automatic. The installer detects your Sunshine unit
 and binary (e.g. `apollo.service`), finds a free dashboard port, and backs up everything it
-touches. `doctor` checks capture, encoder, input, routing and the Tailscale path.
+touches. `doctor` checks capture, encoder, input, routing, the Tailscale path and every route back into the PC.
 
 **Faster launch.** Path check in about a second, no fixed sleeps, screen ready in about 2 s on the PC.
 
 **Safe when remote.** The PC never locks on disconnect by default (a locked host can strand
 you). Opt in with `lock_on_disconnect`.
+
+**A way back in.** *Fix connection* in the menu restarts the PC's streaming: first through the
+dashboard, and if that is dead, over a shell on the PC (Tailscale SSH needs no key). `doctor`
+checks every route back to the PC: sshd, Tailscale SSH, lingering user services, sleep being
+masked, both services starting at boot, and whether a reboot would leave the PC at a login
+prompt with no desktop to stream.
 
 **Diagnostics without asking you.** Each session the Mac sends its Wi-Fi details, per-step
 launch timing, Moonlight's log and the clipboard log to the PC, so problems can be diagnosed there.
@@ -55,6 +61,7 @@ launch timing, Moonlight's log and the clipboard log to the PC, so problems can 
 | Main monitor (ultrawide) | Streams the PC's main monitor |
 | All three monitors | One Moonlight window per PC monitor |
 | Check connection | Direct/relayed, latency and the bitrate it would use |
+| Fix connection | Restarts the PC's streaming (dashboard, else over SSH) |
 | Sound: this Mac / Omarchy speakers | Toggle where audio plays |
 | Clipboard sync: On / Off | Toggle clipboard sync |
 
@@ -94,6 +101,7 @@ omarchy-stream monitors            monitors and the combined desktop
 omarchy-stream virtual WxH@HZ,S    create the virtual screen (or: off)
 omarchy-stream multi setup|up|down one Sunshine per monitor
 omarchy-stream disconnect          end all streams
+omarchy-stream rescue              restart the dashboard and Sunshine (safe over SSH)
 omarchy-stream mac                 print the Mac setup line
 omarchy-stream serve               dashboard/API (runs as a user service)
 ```
@@ -109,11 +117,13 @@ Logs: PC `~/.config/omarchy-stream/{client-report,clipboard}.log`; Mac `~/Librar
 - **Hooks** (Sunshine `global_prep_cmd`): VRR off, stream-only keybindings and audio routing on
   connect; all restored on disconnect.
 - **Dashboard API** (token auth): virtual screen, multi up/down, pairing, clipboard, path check,
-  audio preference, Mac diagnostics, and the Mac app's self-update files.
+  audio preference, rescue, Mac diagnostics, and the Mac app's self-update files.
+- **Getting back in**: the dashboard and Sunshine both start at boot and survive logout
+  (lingering), the PC never sleeps, and `rescue` runs over SSH with no desktop involved.
 
 ## Tests
 
-`tests/run.sh` runs 163 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
+`tests/run.sh` runs 176 checks with stubbed system tools (Sunshine, Hyprland, Tailscale, PipeWire,
 macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API, Mac client and app.
 
 ## Known limits
@@ -122,5 +132,9 @@ macOS tools, Moonlight): installer, doctor, hooks, virtual/multi, dashboard API,
 - Raycast "Paste" can race the sync by a few milliseconds; if the previous item pastes, press Cmd+V again.
 - Mac Wi-Fi still shows occasional latency spikes; a cable gives the best result.
 - Upgrading from v1: `install.sh` comments out v1's `serve.sh` / `disable-wifi.sh` autostart lines.
+- Nothing can start a desktop remotely: if the PC reboots with no TTY autologin, it waits at a
+  login prompt and there is nothing to stream. `doctor` warns about it; turning autologin on means
+  anyone sitting at the PC has your desktop, so it is your call, not the installer's.
+- Dictation uses the PC's microphone, so it is for when you are near the PC, not truly remote.
 
 See [KEYBOARD-SHORTCUTS.md](KEYBOARD-SHORTCUTS.md) for more Moonlight and Hyprland shortcuts.

@@ -293,7 +293,105 @@ def cmd_doctor_results():
     out, code = run(["nvidia-smi", "--query-gpu=name,driver_version", "--format=csv,noheader"])
     if code == 0 and out:
         results.append(check("gpu", "ok", out))
+    results += remote_access_results()
     return results
+
+
+AUTOLOGIN_DROPIN = Path("/etc/systemd/system/getty@tty1.service.d")
+
+
+def autologin_user():
+    """The user TTY1 logs in as by itself, if any. Without one, a reboot leaves no session to stream."""
+    try:
+        files = sorted(AUTOLOGIN_DROPIN.glob("*.conf"))
+    except OSError:
+        return None
+    for f in files:
+        try:
+            m = re.search(r"--autologin\s+(\S+)", f.read_text())
+        except OSError:
+            continue
+        if m:
+            return m.group(1)
+    return None
+
+
+def remote_access_results():
+    """Can you still get in when the stream can't? Each answer here is another way back to this machine."""
+    results = []
+    me = os.environ.get("USER", "")
+
+    state = (run(["systemctl", "is-active", "sshd"])[0] or "unknown").strip()
+    results.append(check("ssh", "ok" if state == "active" else "fail", f"sshd is {state}",
+                         None if state == "active" else
+                         "sudo systemctl enable --now sshd   (your way in when Sunshine is down)"))
+
+    prefs, _ = run(["tailscale", "debug", "prefs"])
+    try:
+        run_ssh = json.loads(prefs).get("RunSSH") is True
+    except json.JSONDecodeError:
+        run_ssh = False
+    results.append(check("tailscale-ssh", "ok" if run_ssh else "warn",
+                         "on: the Mac can SSH in without setting up a key" if run_ssh else
+                         "off: SSH needs the Mac's key in ~/.ssh/authorized_keys",
+                         None if run_ssh else
+                         f"sudo tailscale up --ssh   (then 'tailscale ssh {me}@$(hostname)' works from the Mac)"))
+
+    out, _ = run(["loginctl", "show-user", me, "-p", "Linger"])
+    linger = "yes" in out.lower()
+    results.append(check("linger", "ok" if linger else "warn",
+                         "user services survive logout" if linger else "user services die with your session",
+                         None if linger else f"loginctl enable-linger {me}"))
+
+    awake = [t for t in ("sleep.target", "suspend.target", "hibernate.target")
+             if (run(["systemctl", "is-enabled", t])[0] or "").strip() != "masked"]
+    results.append(check("stays-awake", "ok" if not awake else "warn",
+                         "sleep, suspend and hibernate are masked" if not awake else
+                         f"can still sleep ({', '.join(awake)}), and a sleeping PC is unreachable",
+                         None if not awake else "sudo systemctl mask sleep.target suspend.target hibernate.target"))
+
+    for unit in ("omarchy-stream-dashboard", main_unit()):
+        on = (run(["systemctl", "--user", "is-enabled", unit])[0] or "").strip() == "enabled"
+        results.append(check(f"boots:{unit}", "ok" if on else "warn",
+                             "starts on boot" if on else "does not start on boot",
+                             None if on else f"systemctl --user enable {unit}"))
+
+    who = autologin_user()
+    results.append(check("autologin", "ok" if who else "warn",
+                         f"TTY1 logs in as {who}, so a reboot brings the desktop back" if who else
+                         "none: after a reboot the PC waits at a login prompt, with no desktop to stream",
+                         None if who else
+                         "A reboot needs someone to log in at the machine. TTY1 autologin fixes that, but then "
+                         "anyone sitting at this PC gets your desktop: only do it if the PC stands somewhere you trust."))
+    return results
+
+
+def hypr_up():
+    hypr = Path(f"/run/user/{os.getuid()}/hypr")
+    try:
+        return hypr.is_dir() and any(hypr.iterdir())
+    except OSError:
+        return False
+
+
+def rescue_streams():
+    """Clear out stuck instances and restart the main Sunshine. Leaves the dashboard alone."""
+    for n in instance_names():
+        if service_state(f"sunshine@{n}") == "active":
+            run(["systemctl", "--user", "stop", f"sunshine@{n}"], timeout=30)
+    run(["systemctl", "--user", "restart", main_unit()], timeout=30)
+    return {"unit": main_unit(), "state": service_state(main_unit()), "hyprland": hypr_up()}
+
+
+def cmd_rescue(_args):
+    """Put the pieces back with no desktop involved: what the Mac runs over SSH when a stream won't start."""
+    info = rescue_streams()
+    run(["systemctl", "--user", "restart", "omarchy-stream-dashboard"], timeout=30)
+    print(f"dashboard: {service_state('omarchy-stream-dashboard')}")
+    print(f"{info['unit']}: {info['state']}")
+    print("hyprland: up" if info["hyprland"] else
+          "hyprland: DOWN - nothing to stream until someone logs in at the machine")
+    return 0
 
 
 def cmd_doctor(args):
@@ -888,6 +986,7 @@ def mac_client_env(token, dash_port):
         "VIRTUAL_PORT": VIRTUAL_PORT,
         "TOKEN": token,
         "DASHBOARD_PORT": dash_port,
+        "HOST_USER": os.environ.get("USER", ""),   # who to SSH in as when the dashboard is dead
     }.items())
 
 
@@ -1089,6 +1188,9 @@ def make_handler(token):
                 ok = clipboard_set(self.rfile.read(n), ctype)
                 clip_log(f"Mac->Linux {ctype} {n} bytes {'ok' if ok else 'FAILED'}")
                 return self.send(200 if ok else 500, {"ok": ok})
+            if self.path == "/api/rescue":  # the Mac's "Fix connection": restart Sunshine, keep this server up
+                info = rescue_streams()
+                return self.send(200, {"ok": info["state"] == "active", **info})
             if self.path == "/api/report":  # Mac diagnostics, so problems can be read here
                 n = min(int(self.headers.get("Content-Length") or 0), 16384)
                 text = self.rfile.read(n).decode(errors="replace")
@@ -1170,6 +1272,7 @@ def main():
     h = sub.add_parser("hook"); h.add_argument("event", choices=["connect", "disconnect"]); h.set_defaults(fn=cmd_hook)
     v = sub.add_parser("virtual"); v.add_argument("spec"); v.set_defaults(fn=cmd_virtual)
     sub.add_parser("mac", help="print the one-line Mac setup command").set_defaults(fn=cmd_mac)
+    sub.add_parser("rescue", help="restart the dashboard and Sunshine; safe to run over SSH").set_defaults(fn=cmd_rescue)
     sub.add_parser("disconnect", help="end all running streams").set_defaults(fn=cmd_disconnect)
     sub.add_parser("audio-apply", help=argparse.SUPPRESS).set_defaults(fn=cmd_audio_apply)
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, help="default: dashboard_port in config.json (8080)")
