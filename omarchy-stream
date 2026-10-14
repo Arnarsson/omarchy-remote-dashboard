@@ -943,6 +943,15 @@ def clipboard_get():
     return b"", ""
 
 
+def clip_log(msg):
+    try:
+        f = STATE_DIR / "clipboard.log"
+        lines = (f.read_text().splitlines()[-300:] if f.exists() else []) + [f"{time.strftime('%H:%M:%S')} {msg}"]
+        f.write_text("\n".join(lines) + "\n")
+    except OSError:
+        pass
+
+
 def clipboard_set(data, ctype):
     kind = "image/png" if ctype.startswith("image/png") else "text/plain;charset=utf-8"
     try:
@@ -1001,6 +1010,7 @@ def make_handler(token):
                 digest = hashlib.sha1(data).hexdigest()
                 if digest == have:
                     return self.send(304, b"", "text/plain")
+                clip_log(f"Linux->Mac {ctype} {len(data)} bytes")
                 return self.send(200, data, ctype)
             if self.path == "/mac/omarchy-connect":  # the app self-updates from here
                 return self.send(200, (APP_DIR / "mac/omarchy-connect").read_bytes(), "text/x-shellscript")
@@ -1040,7 +1050,9 @@ def make_handler(token):
                 n = int(self.headers.get("Content-Length") or 0)
                 if n <= 0 or n > CLIP_MAX:
                     return self.send(413 if n > CLIP_MAX else 400, {"error": "bad size"})
-                ok = clipboard_set(self.rfile.read(n), self.headers.get("Content-Type", "text/plain"))
+                ctype = self.headers.get("Content-Type", "text/plain")
+                ok = clipboard_set(self.rfile.read(n), ctype)
+                clip_log(f"Mac->Linux {ctype} {n} bytes {'ok' if ok else 'FAILED'}")
                 return self.send(200 if ok else 500, {"ok": ok})
             if self.path == "/api/report":  # Mac diagnostics, so problems can be read here
                 n = min(int(self.headers.get("Content-Length") or 0), 16384)

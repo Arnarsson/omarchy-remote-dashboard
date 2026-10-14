@@ -88,7 +88,7 @@ isn't possible with KMS. Use `multi` or `virtual` for more than the main monitor
 
 ## Tests
 
-`tests/run.sh` runs 153 checks with stubbed system tools (installer, doctor, hooks,
+`tests/run.sh` runs 156 checks with stubbed system tools (installer, doctor, hooks,
 multi/virtual, dashboard API and auth, Mac script bitrate tiers). Run it after any change.
 
 ## Reading the result

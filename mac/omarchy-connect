@@ -125,8 +125,10 @@ update_launcher() {
 
 # After a session: Moonlight's own log (connect timing, decoder, errors) to the host, in the background.
 send_log() {
-  [[ -n ${TOKEN:-} && -s $2 ]] || { rm -f "$2"; return 0; }
-  { echo "mode=$1 moonlight log (started at +${TIMES##*moonlight=}):"; tail -120 "$2"; } \
+  local cl="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"
+  [[ -n ${TOKEN:-} ]] && [[ -s $2 || -s $cl ]] || { rm -f "$2"; return 0; }
+  { echo "mode=$1 moonlight log (started at +${TIMES##*moonlight=}):"; tail -120 "$2"
+    echo "--- clipboard log:"; tail -30 "$cl" 2>/dev/null; } \
     | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
       "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
   rm -f "$2"
@@ -155,11 +157,19 @@ wifi_restore() {
 # history (or Cmd+C on either side) works across. Off: CLIPBOARD=0 in client.env.
 clip_sync() {
   [[ ${CLIPBOARD:-1} == 1 && -n ${TOKEN:-} ]] || return 0
+  set +e +o pipefail   # runs in its own subshell: one failed curl/osascript must not end the loop
   local url="http://$HOST:$DASHBOARD_PORT/api/clipboard" auth="Authorization: Bearer $TOKEN"
+  CLIPLOG="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"; mkdir -p "$(dirname "$CLIPLOG")" 2>/dev/null
+  clog() { echo "$(date +%H:%M:%S) $*" >> "$CLIPLOG"; }
+  clog "start (host $HOST)"
   local dir n=0 last="" last_text info i h code
   dir=$(mktemp -d)
   sha() { shasum -a 1 "$1" | cut -d' ' -f1; }
-  push() { curl -fsS -m 15 -X POST -H "$auth" -H "Content-Type: $2" --data-binary @"$1" "$url" >/dev/null && last=$(sha "$1"); }
+  push() {
+    if curl -fsS -m 15 -X POST -H "$auth" -H "Content-Type: $2" --data-binary @"$1" "$url" >/dev/null 2>>"$CLIPLOG"; then
+      last=$(sha "$1"); clog "Mac->Linux $2 $(wc -c < "$1" | tr -d ' ') bytes"
+    else clog "Mac->Linux FAILED ($2)"; fi
+  }
   last_text=$(pbpaste 2>/dev/null | cksum)       # what's on the clipboard at start stays put
   info=$(osascript -e 'clipboard info' 2>/dev/null)
   while sleep 0.15; do
@@ -185,7 +195,7 @@ clip_sync() {
     if (( n % 4 == 0 )); then
       code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$last" 2>/dev/null)
       if [[ $code == 200 && -s $dir/in ]]; then
-        last=$(sha "$dir/in")
+        last=$(sha "$dir/in"); clog "Linux->Mac $(grep -i '^content-type' "$dir/hdr" | tr -d '\r' | cut -d' ' -f2) $(wc -c < "$dir/in" | tr -d ' ') bytes"
         if grep -qi '^content-type: image/png' "$dir/hdr"; then
           osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
           info=$(osascript -e 'clipboard info' 2>/dev/null)
@@ -197,7 +207,7 @@ clip_sync() {
     # Multi mode has no foreground Moonlight to wait on: stop once no Moonlight window is left.
     if (( n > 60 && n % 20 == 0 )) && ! pgrep -xq Moonlight; then break; fi
   done
-  rm -rf "$dir"
+  clog "stop"; rm -rf "$dir"
 }
 
 api() {  # POST to the host dashboard

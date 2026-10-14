@@ -183,3 +183,8 @@ instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timin
 - Restore ran before workspaces migrated (DP-1 was left on an empty ws 5). Now it waits for configreloaded and re-checks up to 3 times.
 - Mac timing report: start=2s measured=10s screen_ready=14s moonlight=16s, and Moonlight connected at +45 s (Sunshine ready at +10 s).
   The measure was slow because of the Mac Tailscale CLI, so the host now answers /api/path. Moonlight's ~29 s is unexplained; the app now sends Moonlight's log after each session.
+- 11:55 user: "clipboard no work". Likely cause: clip_sync ran under the script's `set -e`; the first failed push
+  (`[[ ]] && push` with push returning curl's failure) or a failing `$(osascript ...)` ended the loop silently for the
+  whole session (shown with a minimal repro: dies at tick 1). Fix: `set +e +o pipefail` inside the loop, push always
+  returns 0, Mac log ~/Library/Logs/omarchy-clipboard.log (sent to the host after each session), and the host log
+  ~/.config/omarchy-stream/clipboard.log. Tests: multi tests isolated (stray clip loops polluted the suite), strays pkill'd on exit.

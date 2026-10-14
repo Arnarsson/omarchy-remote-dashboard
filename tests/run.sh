@@ -5,7 +5,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
-trap 'jobs -p | xargs -r kill 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'jobs -p | xargs -r kill 2>/dev/null; pkill -f -- "$ROOT/mac/omarchy-connect" 2>/dev/null; pkill -f -- "$WORK/" 2>/dev/null; rm -rf "$WORK"' EXIT
 STUBS=$WORK/stubs; mkdir -p "$STUBS"
 export LOG=$WORK/calls.log STATE=$WORK/state; mkdir -p "$STATE"; : > "$LOG"
 PASS=0; FAIL=0
@@ -222,6 +222,7 @@ check "report needs the token"            '[ "$(curl -s -o /dev/null -w %{http_c
 rm -f "$STATE/clip" "$STATE/cliptype"
 check "clipboard: empty gives 204"        '[ "$(curl -s -o /dev/null -w %{http_code} "${A[@]}" localhost:$PORT/api/clipboard)" = 204 ]'
 curl -s -X POST "${A[@]}" -H "Content-Type: text/plain; charset=utf-8" --data-binary "héllo from mac" localhost:$PORT/api/clipboard >/dev/null
+check "host logs clipboard transfers"     'grep -q "Mac->Linux text/plain; charset=utf-8 15 bytes ok" "$HOME/.config/omarchy-stream/clipboard.log"'
 check "clipboard: Mac text lands on Linux" '[ "$(cat "$STATE/clip")" = "héllo from mac" ] && grep -q "^text/plain;charset=utf-8$" "$STATE/cliptype"'
 check "clipboard: Linux text to Mac"      '[ "$(curl -s "${A[@]}" localhost:$PORT/api/clipboard)" = "héllo from mac" ]'
 H=$(printf "héllo from mac" | shasum -a 1 | cut -d" " -f1)
@@ -338,16 +339,17 @@ check "AirDrop paused and restored"       'grep -q "sudo -n /sbin/ifconfig awdl0
 check "unreachable host fails clearly"    '! PINGS=0 "$MC" all >/dev/null'
 check "all-monitors native resolution"    'grep -q -- "--resolution 5760x1080" "$LOG"'
 check "virtual needs a token"             '! "$MC" virtual >/dev/null'
-check "multi needs a token"               '! "$MC" multi >/dev/null'
+check "multi needs a token"               '! CLIPBOARD=0 "$MC" multi >/dev/null'
 sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
 export CONNECT_SRC=$ROOT/mac/omarchy-connect LAUNCHER_SRC=$ROOT/mac/app/omarchy-remote
-stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
+stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *api/clipboard*-X*|*-X*api/clipboard*) [ -f "$STATE/curlfail" ] && { rm -f "$STATE/curlfail"; exit 7; } ;; esac
+case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
 src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; esac
 [ -n "$src" ] && while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$src" "$2"; shift; done; exit 0'
-: > "$LOG"; "$MC" multi >/dev/null
+: > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi splits bitrate across 3"     '[ "$(grep -c "OPEN -n -a Moonlight" "$LOG")" = 3 ] && grep -q -- "--bitrate 20000" "$LOG"'
 sed -i 's/^MONITOR_RES=.*/MONITOR_RES="1920x1080 3440x1440 1920x1080"/' "$HOME/.config/omarchy-stream/client.env"
-: > "$LOG"; "$MC" multi >/dev/null
+: > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi: one size per monitor"       'grep -q "48189 Desktop --resolution 3440x1440" "$LOG" && grep -q "48289 Desktop --resolution 1920x1080" "$LOG"'
 : > "$LOG"; "$MC" virtual >/dev/null
 check "virtual sized to Mac display"      'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q -- "--resolution 3024x1964" "$LOG" && grep -q "omarchy:48989" "$LOG"'
@@ -356,7 +358,7 @@ check "Mac reports diagnostics to host"   'grep -q "CURL .*--data-binary @- http
 check "virtual pairs itself once"         'grep -q "api/pair/48989/[0-9]\{4\}" "$LOG" && grep -q "MOONLIGHT pair omarchy:48989 --pin" "$LOG" && [ -f "$HOME/.config/omarchy-stream/paired.48989" ]'
 : > "$LOG"; "$MC" virtual >/dev/null
 check "already paired: no pairing again"  '! grep -q "api/pair" "$LOG"'
-rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; "$MC" multi >/dev/null
+rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'
 section "Mac app (Omarchy Remote.app)"
@@ -373,6 +375,10 @@ check "app: notifications, no terminal"   'grep -q "OSA -e display notification"
 echo "old" > "$STATE/macclip"; : > "$LOG"
 HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.4; echo from-raycast > \"$STATE/macclip\"; sleep 0.8" "$L2"
 check "app: Raycast copy syncs to Linux"  'grep -q "CURL -fsS -m 15 -X POST .*Content-Type: text/plain.*/api/clipboard" "$LOG"'
+echo "old" > "$STATE/macclip"; touch "$STATE/curlfail"; : > "$LOG"; rm -f "$MH/Library/Logs/omarchy-clipboard.log"
+HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.4; echo first > \"$STATE/macclip\"; sleep 0.6; echo second > \"$STATE/macclip\"; sleep 0.6" "$L2"
+check "app: clipboard survives a failure" 'grep -q "Mac->Linux FAILED" "$MH/Library/Logs/omarchy-clipboard.log" && grep -q "Mac->Linux text/plain" "$MH/Library/Logs/omarchy-clipboard.log"'
+check "app: clipboard log sent to host"   'grep -q -- "--- clipboard log:" "$LOG"'
 check "app: clipboard loop stops after"   '! pgrep -f "sleep 0.15" >/dev/null || sleep 0.5; true'
 check "app: clipboard sync on by default" 'grep -q "Clipboard sync: On (turn off)" "$LOG"'
 printf "Clipboard sync: On (turn off)\nfalse\n" > "$STATE/choices"; : > "$LOG"; HOME=$MH "$L2"
