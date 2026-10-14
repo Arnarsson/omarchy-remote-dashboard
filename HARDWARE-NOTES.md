@@ -163,3 +163,13 @@ each connect (--audio-on-host); `virtual off` restores the physical monitors' wo
   (dialogs, 10 sequential `tailscale ping`s, Moonlight start, fixed 2 s sleep).
 Changes: measure = 1 tailscale ping (path) + `ping -c 10 -i 0.1` (about 1 s); the host polls (mode applied, port listening)
 instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timing line ("timing: start= measured= screen_ready= moonlight=").
+
+## Clipboard sync (11:40). Request: "copy paste from Raycast clipboard, pics and text, on by default but optional"
+- Host: GET /api/clipboard[?have=sha1] (200 body or 304/204), POST (text or image/png -> wl-copy). Verified with real
+  wl-clipboard: text in/out, 304 on the same hash, a 1x1 PNG round-trips identically; the user's clipboard was restored afterwards.
+- Mac: clip_sync loop while streaming (text every 0.15 s via pbpaste|cksum, PNG every 0.45 s via `clipboard info` +
+  osascript «class PNGf» + xxd, host->Mac every 0.6 s). CLIPBOARD=1 default; the app menu toggles it.
+- The launcher now self-updates via the client (atomic mv); GET /mac/app/omarchy-remote.
+- Bug caught by tests: under set -e, `kill $clip` on an exited loop aborted before AirDrop was restored.
+- Known race: Raycast "Paste" copies then sends Cmd+V at once; the sync can lag by up to 0.15 s, so the first paste may be the
+  previous item. Unverified on the Mac (osascript image paths, xxd).

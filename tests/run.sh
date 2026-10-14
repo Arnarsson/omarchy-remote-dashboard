@@ -26,7 +26,7 @@ stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE
   echo "64 bytes from 100.73.206.17: icmp_seq=$i ttl=64 time=$r ms"; i=$((i+1)); done'
 stub route     '[ -n "$WIFI" ] && echo "  interface: en0" || echo "  interface: en7"'
 stub networksetup 'printf "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: USB LAN\nDevice: en7\n"'
-stub osascript 'case "$*" in *"choose from list"*) echo "${CHOICE:-false}" ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
+stub osascript 'case "$*" in *"choose from list"*) echo "OSA $*" >> "$LOG"; if [ -s "$STATE/choices" ]; then head -1 "$STATE/choices"; sed -i 1d "$STATE/choices"; else echo "${CHOICE:-false}"; fi ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
 stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING> mtu 1500"; exit 0'
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
@@ -59,7 +59,11 @@ case "$1" in
         esac; echo ok ;;
   output) [ "$2" = create ] && touch "$STATE/virtual"; [ "$2" = remove ] && rm -f "$STATE/virtual"; echo ok ;;
 esac'
-stub moonlight 'echo "MOONLIGHT $*" >> "$LOG"'
+stub moonlight 'echo "MOONLIGHT $*" >> "$LOG"; [ -n "$ML_HOOK" ] && sh -c "$ML_HOOK"; exit 0'
+stub wl-copy   'while [ $# -gt 0 ]; do [ "$1" = --type ] && echo "$2" > "$STATE/cliptype"; shift; done; cat > "$STATE/clip"'
+stub wl-paste  'case "$*" in *--list-types*) t=$(cat "$STATE/cliptype" 2>/dev/null); [ -n "$t" ] && echo "$t"; case "$t" in text*) echo TEXT ;; esac ;; *) cat "$STATE/clip" 2>/dev/null ;; esac'
+stub pbpaste   'cat "$STATE/macclip" 2>/dev/null'
+stub pbcopy    'cat > "$STATE/macclip"'
 stub open      'echo "OPEN $*" >> "$LOG"'
 stub system_profiler 'printf "Graphics/Displays:\n    Displays:\n        Color LCD:\n          Display Type: Built-in Liquid Retina XDR Display\n          Resolution: 3024 x 1964 Retina\n"'
 export PATH=$STUBS:$PATH MOONLIGHT=$STUBS/moonlight LAUNCH_DELAY=0
@@ -209,6 +213,17 @@ check "API multi down restores main"      'grep -q "stop sunshine@DP-2" "$LOG" &
 curl -s -X POST "${A[@]}" --data-binary "mode=virtual relayed=no rtt=4ms" localhost:$PORT/api/report >/dev/null
 check "host stores Mac reports"           'grep -q "mode=virtual relayed=no rtt=4ms" "$HOME/.config/omarchy-stream/client-report.log"'
 check "report needs the token"            '[ "$(curl -s -o /dev/null -w %{http_code} -X POST --data-binary x localhost:$PORT/api/report)" = 401 ]'
+rm -f "$STATE/clip" "$STATE/cliptype"
+check "clipboard: empty gives 204"        '[ "$(curl -s -o /dev/null -w %{http_code} "${A[@]}" localhost:$PORT/api/clipboard)" = 204 ]'
+curl -s -X POST "${A[@]}" -H "Content-Type: text/plain; charset=utf-8" --data-binary "héllo from mac" localhost:$PORT/api/clipboard >/dev/null
+check "clipboard: Mac text lands on Linux" '[ "$(cat "$STATE/clip")" = "héllo from mac" ] && grep -q "^text/plain;charset=utf-8$" "$STATE/cliptype"'
+check "clipboard: Linux text to Mac"      '[ "$(curl -s "${A[@]}" localhost:$PORT/api/clipboard)" = "héllo from mac" ]'
+H=$(printf "héllo from mac" | shasum -a 1 | cut -d" " -f1)
+check "clipboard: unchanged gives 304"    '[ "$(curl -s -o /dev/null -w %{http_code} "${A[@]}" "localhost:$PORT/api/clipboard?have=$H")" = 304 ]'
+printf "\x89PNG\r\n\x1a\nfakeimage" > "$WORK/pic.png"
+curl -s -X POST "${A[@]}" -H "Content-Type: image/png" --data-binary @"$WORK/pic.png" localhost:$PORT/api/clipboard >/dev/null
+check "clipboard: pictures both ways"     'grep -q "^image/png$" "$STATE/cliptype" && curl -s -D "$WORK/h" -o "$WORK/back.png" "${A[@]}" localhost:$PORT/api/clipboard && cmp -s "$WORK/pic.png" "$WORK/back.png" && grep -qi "content-type: image/png" "$WORK/h"'
+check "clipboard needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/api/clipboard)" = 401 ]'
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -318,8 +333,10 @@ check "all-monitors native resolution"    'grep -q -- "--resolution 5760x1080" "
 check "virtual needs a token"             '! "$MC" virtual >/dev/null'
 check "multi needs a token"               '! "$MC" multi >/dev/null'
 sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
-export CONNECT_SRC=$ROOT/mac/omarchy-connect
-stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac; case "$*" in *mac/omarchy-connect*) while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$CONNECT_SRC" "$2"; shift; done ;; esac'
+export CONNECT_SRC=$ROOT/mac/omarchy-connect LAUNCHER_SRC=$ROOT/mac/app/omarchy-remote
+stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
+src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; esac
+[ -n "$src" ] && while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$src" "$2"; shift; done; exit 0'
 : > "$LOG"; "$MC" multi >/dev/null
 check "multi splits bitrate across 3"     '[ "$(grep -c "OPEN -n -a Moonlight" "$LOG")" = 3 ] && grep -q -- "--bitrate 20000" "$LOG"'
 sed -i 's/^MONITOR_RES=.*/MONITOR_RES="1920x1080 3440x1440 1920x1080"/' "$HOME/.config/omarchy-stream/client.env"
@@ -338,12 +355,26 @@ check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$
 section "Mac app (Omarchy Remote.app)"
 L2="$APPB/Contents/MacOS/omarchy-remote"
 echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
+echo "# local edit" >> "$L2"
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" "$L2"
 check "app: self-updates its client"      'cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && grep -q "CURL .*/mac/omarchy-connect" "$LOG"'
+check "app: self-updates its launcher"    'cmp -s "$L2" "$ROOT/mac/app/omarchy-remote"'
 check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
 check "app: report carries step timing"  'grep -q "timing: start=.*measured=.*screen_ready=.*moonlight=" "$LOG"'
 check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
+echo "old" > "$STATE/macclip"; : > "$LOG"
+HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.4; echo from-raycast > \"$STATE/macclip\"; sleep 0.8" "$L2"
+check "app: Raycast copy syncs to Linux"  'grep -q "CURL -fsS -m 15 -X POST .*Content-Type: text/plain.*/api/clipboard" "$LOG"'
+check "app: clipboard loop stops after"   '! pgrep -f "sleep 0.15" >/dev/null || sleep 0.5; true'
+check "app: clipboard sync on by default" 'grep -q "Clipboard sync: On (turn off)" "$LOG"'
+printf "Clipboard sync: On (turn off)\nfalse\n" > "$STATE/choices"; : > "$LOG"; HOME=$MH "$L2"
+check "app: menu turns clipboard off"     'grep -q "^CLIPBOARD=0$" "$MH/.config/omarchy-stream/client.env" && grep -q "Clipboard sync: Off (turn on)" "$LOG"'
+echo "old" > "$STATE/macclip"; : > "$LOG"
+HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.4; echo copied > \"$STATE/macclip\"; sleep 0.6" "$L2"
+check "app: clipboard off means no sync"  '! grep -q "/api/clipboard" "$LOG"'
+printf "Clipboard sync: Off (turn on)\nfalse\n" > "$STATE/choices"; HOME=$MH "$L2"
+check "app: menu turns it back on"        'grep -q "^CLIPBOARD=1$" "$MH/.config/omarchy-stream/client.env"'
 check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
 check "app: sound on Omarchy speakers"    'grep -q -- "--audio-on-host" "$LOG" && grep -q "^AUDIO=host$" "$MH/.config/omarchy-stream/client.env"'

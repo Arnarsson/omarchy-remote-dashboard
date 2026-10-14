@@ -22,14 +22,22 @@ if [[ -f $conf ]]; then
 fi
 
 V="Screen sized to this Mac"; M="Main monitor (ultrawide)"; A="All three monitors"; C="Check connection"
-choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
-case "$choice" in
-  "$V") mode=virtual ;;
-  "$M") mode=all ;;
-  "$A") mode=multi ;;
-  "$C") mode=check ;;
-  *) exit 0 ;;   # cancelled
-esac
+while true; do
+  # Settings toggles live in the same list; picking one flips it and shows the list again.
+  CLIPBOARD=1; [[ -f $conf ]] && CLIPBOARD=$(grep -E '^CLIPBOARD=' "$conf" | tail -1 | cut -d= -f2); CLIPBOARD=${CLIPBOARD:-1}
+  if [[ $CLIPBOARD == 1 ]]; then K="Clipboard sync: On (turn off)"; else K="Clipboard sync: Off (turn on)"; fi
+  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
+  case "$choice" in
+    "$V") mode=virtual; break ;;
+    "$M") mode=all; break ;;
+    "$A") mode=multi; break ;;
+    "$C") mode=check; break ;;
+    "$K") new=$(( 1 - CLIPBOARD ))
+          if grep -q '^CLIPBOARD=' "$conf"; then sed -i.bak "s/^CLIPBOARD=.*/CLIPBOARD=$new/" "$conf" && rm -f "$conf.bak"
+          else echo "CLIPBOARD=$new" >> "$conf"; fi ;;
+    *) exit 0 ;;   # cancelled
+  esac
+done
 
 echo "=== $(date) $mode" >> "$APPLOG"
 tmp=$(mktemp)

@@ -100,6 +100,20 @@ report() {
 T0=${OMARCHY_T0:-$(date +%s)}; TIMES=
 stamp() { TIMES+="$1=$(( $(date +%s) - T0 ))s "; }
 
+# The app's launcher updates through here too: swap it atomically (bash keeps the old inode).
+update_launcher() {
+  [[ -n ${OMARCHY_GUI:-} && -n ${TOKEN:-} ]] || return 0
+  local me launcher new
+  me=$(cd "$(dirname "$0")" && pwd); launcher="$me/../MacOS/omarchy-remote"
+  [[ -f $launcher ]] || return 0
+  new="$launcher.new"
+  if curl -fsS -m 3 -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/mac/app/omarchy-remote" -o "$new" 2>/dev/null \
+     && head -1 "$new" | grep -q '^#!/bin/bash' && bash -n "$new" && ! cmp -s "$new" "$launcher"; then
+    chmod +x "$new" && mv -f "$new" "$launcher"
+  fi
+  rm -f "$new"
+}
+
 # Notification when run from Omarchy Remote.app (no terminal to print to).
 notify() {
   [[ -n ${OMARCHY_GUI:-} ]] || return 0
@@ -117,6 +131,55 @@ wifi_quiet() {
 }
 wifi_restore() {
   [[ -n ${AWDL_PAUSED:-} ]] && sudo -n /sbin/ifconfig awdl0 up 2>/dev/null && echo "AirDrop back on." || true
+}
+
+# Clipboard sync while streaming, both ways: text and pictures (PNG). So Raycast's clipboard
+# history (or Cmd+C on either side) works across. Off: CLIPBOARD=0 in client.env.
+clip_sync() {
+  [[ ${CLIPBOARD:-1} == 1 && -n ${TOKEN:-} ]] || return 0
+  local url="http://$HOST:$DASHBOARD_PORT/api/clipboard" auth="Authorization: Bearer $TOKEN"
+  local dir n=0 last="" last_text info i h code
+  dir=$(mktemp -d)
+  sha() { shasum -a 1 "$1" | cut -d' ' -f1; }
+  push() { curl -fsS -m 15 -X POST -H "$auth" -H "Content-Type: $2" --data-binary @"$1" "$url" >/dev/null && last=$(sha "$1"); }
+  last_text=$(pbpaste 2>/dev/null | cksum)       # what's on the clipboard at start stays put
+  info=$(osascript -e 'clipboard info' 2>/dev/null)
+  while sleep 0.15; do
+    n=$((n+1))
+    # Mac -> host, text: cheap enough to check every tick (Raycast pastes right after copying).
+    i=$(pbpaste 2>/dev/null | cksum)
+    if [[ $i != "$last_text" ]]; then
+      last_text=$i; pbpaste > "$dir/out" 2>/dev/null
+      if [[ -s $dir/out ]]; then h=$(sha "$dir/out"); [[ $h != "$last" ]] && push "$dir/out" "text/plain; charset=utf-8"; fi
+    fi
+    # Mac -> host, pictures: osascript is slower, so every 3rd tick.
+    if (( n % 3 == 0 )); then
+      i=$(osascript -e 'clipboard info' 2>/dev/null)
+      if [[ $i != "$info" ]]; then
+        info=$i
+        if [[ $i == *PNGf* || $i == *TIFF* ]] && [[ -z $(pbpaste 2>/dev/null) ]]; then
+          osascript -e 'the clipboard as «class PNGf»' 2>/dev/null | sed -E 's/^«data PNGf//; s/»$//' | xxd -r -p > "$dir/out.png"
+          if [[ -s $dir/out.png ]]; then h=$(sha "$dir/out.png"); [[ $h != "$last" ]] && push "$dir/out.png" image/png; fi
+        fi
+      fi
+    fi
+    # Host -> Mac: ask for the host clipboard unless it's what we already have (304).
+    if (( n % 4 == 0 )); then
+      code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$last" 2>/dev/null)
+      if [[ $code == 200 && -s $dir/in ]]; then
+        last=$(sha "$dir/in")
+        if grep -qi '^content-type: image/png' "$dir/hdr"; then
+          osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
+          info=$(osascript -e 'clipboard info' 2>/dev/null)
+        else
+          pbcopy < "$dir/in"; last_text=$(pbpaste 2>/dev/null | cksum)
+        fi
+      fi
+    fi
+    # Multi mode has no foreground Moonlight to wait on: stop once no Moonlight window is left.
+    if (( n > 60 && n % 20 == 0 )) && ! pgrep -xq Moonlight; then break; fi
+  done
+  rm -rf "$dir"
 }
 
 api() {  # POST to the host dashboard
@@ -166,6 +229,8 @@ case "${1:-all}" in all|virtual|multi) audio_choice ;; esac
 
 KEYS_HINT="Ctrl+Option+1-5: bring workspace here · Ctrl+Option+Q: disconnect"
 
+update_launcher &
+
 common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen "${mouse[@]}")
 
 case "${1:-all}" in
@@ -174,9 +239,10 @@ case "${1:-all}" in
     stamp start; measure; stamp measured
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
     wifi_quiet; stamp moonlight; report all &
+    clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
-    wifi_restore; wait 2>/dev/null || true ;;
+    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
   virtual)
     need_token
     stamp start; measure; stamp measured
@@ -189,9 +255,10 @@ case "${1:-all}" in
     stamp screen_ready   # the host returns once Sunshine is listening; no fixed wait
     pair_once "$VIRTUAL_PORT" || true
     wifi_quiet; stamp moonlight; report virtual &
+    clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
-    wifi_restore; wait 2>/dev/null || true   # let the background report finish
+    kill $clip 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
     echo "Virtual display removed." ;;
   multi)
@@ -212,6 +279,7 @@ case "${1:-all}" in
     if wifi_quiet && [[ -n ${AWDL_PAUSED:-} ]]; then   # windows run on their own; restore when the last one closes
       ( sleep 10; while pgrep -xq Moonlight; do sleep 3; done; sudo -n /sbin/ifconfig awdl0 up ) >/dev/null 2>&1 &
     fi
+    ( clip_sync ) >/dev/null 2>&1 &   # stops by itself when the last Moonlight window closes
     notify "Drag each window to its Mac display"
     echo "Drag each Moonlight window to its Mac display." ;;
   *) sed -n 2,9p "$0"; exit 1 ;;
