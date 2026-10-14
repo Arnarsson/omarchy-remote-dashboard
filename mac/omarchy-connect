@@ -127,7 +127,9 @@ update_launcher() {
 send_log() {
   local cl="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"
   [[ -n ${TOKEN:-} ]] && [[ -s $2 || -s $cl ]] || { rm -f "$2"; return 0; }
+  local real; real=$(grep -o 'Redirecting log output to [^ ]*' "$2" 2>/dev/null | awk '{print $NF}' | tail -1 || true)
   { echo "mode=$1 moonlight log (started at +${TIMES##*moonlight=}):"; tail -120 "$2"
+    [[ -n $real && -f $real ]] && { echo "--- $real:"; tail -150 "$real"; }
     echo "--- clipboard log:"; tail -30 "$cl" 2>/dev/null; } \
     | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
       "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
@@ -154,60 +156,63 @@ wifi_restore() {
 }
 
 # Clipboard sync while streaming, both ways: text and pictures (PNG). So Raycast's clipboard
-# history (or Cmd+C on either side) works across. Off: CLIPBOARD=0 in client.env.
+# history (or Cmd+C on either side) works across. Off: CLIPBOARD=0 in client.env (or the app menu).
+# Mac side: one long-running JXA watcher polls NSPasteboard.changeCount every 30 ms and grabs the
+# content immediately, so even clipboard managers that swap it back right after pasting are caught.
+CLIP_JXA='ObjC.import("AppKit");
+function out(l){ $.NSFileHandle.fileHandleWithStandardOutput.writeData($(l + "\n").dataUsingEncoding($.NSUTF8StringEncoding)); }
+function run(argv){ var dir = argv[0], pb = $.NSPasteboard.generalPasteboard, c = pb.changeCount, k = 0;
+  while (true) { delay(0.03); var n = pb.changeCount; if (n === c) continue; c = n; k++;
+    var s = pb.stringForType("public.utf8-plain-text");
+    if (s && !s.isNil()) { var p = dir + "/t" + k; s.writeToFileAtomicallyEncodingError(p, true, 4, null); out("text " + p); continue; }
+    var d = pb.dataForType("public.png");
+    if (!d || d.isNil()) { var t = pb.dataForType("public.tiff");
+      if (t && !t.isNil()) d = $.NSBitmapImageRep.imageRepWithData(t).representationUsingTypeProperties(4, $()); }
+    if (d && !d.isNil()) { var q = dir + "/i" + k + ".png"; d.writeToFileAtomically(q, true); out("png " + q); } } }'
+
 clip_sync() {
   [[ ${CLIPBOARD:-1} == 1 && -n ${TOKEN:-} ]] || return 0
   set +e +o pipefail   # runs in its own subshell: one failed curl/osascript must not end the loop
   local url="http://$HOST:$DASHBOARD_PORT/api/clipboard" auth="Authorization: Bearer $TOKEN"
   CLIPLOG="${CLIPLOG:-$HOME/Library/Logs/omarchy-clipboard.log}"; mkdir -p "$(dirname "$CLIPLOG")" 2>/dev/null
-  clog() { echo "$(date +%H:%M:%S) $*" >> "$CLIPLOG"; }
-  clog "start (host $HOST)"
-  local dir n=0 last="" last_text info i h code
+  local dir n=0 code w
   dir=$(mktemp -d)
+  clog() { echo "$(date +%H:%M:%S) $*" >> "$CLIPLOG"; }
   sha() { shasum -a 1 "$1" | cut -d' ' -f1; }
   push() {
     if curl -fsS -m 15 -X POST -H "$auth" -H "Content-Type: $2" --data-binary @"$1" "$url" >/dev/null 2>>"$CLIPLOG"; then
-      last=$(sha "$1"); clog "Mac->Linux $2 $(wc -c < "$1" | tr -d ' ') bytes"
+      sha "$1" > "$dir/last"; clog "Mac->Linux $2 $(wc -c < "$1" | tr -d ' ') bytes"
     else clog "Mac->Linux FAILED ($2)"; fi
   }
-  last_text=$(pbpaste 2>/dev/null | cksum)       # what's on the clipboard at start stays put
-  info=$(osascript -e 'clipboard info' 2>/dev/null)
-  while sleep 0.15; do
-    n=$((n+1))
-    # Mac -> host, text: cheap enough to check every tick (Raycast pastes right after copying).
-    i=$(pbpaste 2>/dev/null | cksum)
-    if [[ $i != "$last_text" ]]; then
-      last_text=$i; pbpaste > "$dir/out" 2>/dev/null
-      if [[ -s $dir/out ]]; then h=$(sha "$dir/out"); [[ $h != "$last" ]] && push "$dir/out" "text/plain; charset=utf-8"; fi
-    fi
-    # Mac -> host, pictures: osascript is slower, so every 3rd tick.
-    if (( n % 3 == 0 )); then
-      i=$(osascript -e 'clipboard info' 2>/dev/null)
-      if [[ $i != "$info" ]]; then
-        info=$i
-        if [[ $i == *PNGf* || $i == *TIFF* ]] && [[ -z $(pbpaste 2>/dev/null) ]]; then
-          osascript -e 'the clipboard as «class PNGf»' 2>/dev/null | sed -E 's/^«data PNGf//; s/»$//' | xxd -r -p > "$dir/out.png"
-          if [[ -s $dir/out.png ]]; then h=$(sha "$dir/out.png"); [[ $h != "$last" ]] && push "$dir/out.png" image/png; fi
-        fi
+  clog "start (host $HOST)"
+  # Note what Linux has now without copying it over: connecting must not replace the Mac clipboard.
+  curl -sS -m 5 -H "$auth" -o "$dir/in" "$url" 2>/dev/null && [[ -s $dir/in ]] && sha "$dir/in" > "$dir/last"
+  # Mac -> Linux: the watcher prints "text <file>" / "png <file>" on every clipboard change.
+  echo "$CLIP_JXA" > "$dir/watch.js"
+  ( osascript -l JavaScript "$dir/watch.js" "$dir" 2>>"$CLIPLOG" | while read -r kind f; do
+      [[ -s $f ]] || continue
+      if [[ $(sha "$f") != "$(cat "$dir/last" 2>/dev/null)" ]]; then
+        if [[ $kind == png ]]; then push "$f" image/png; else push "$f" "text/plain; charset=utf-8"; fi
       fi
-    fi
-    # Host -> Mac: ask for the host clipboard unless it's what we already have (304).
-    if (( n % 4 == 0 )); then
-      code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$last" 2>/dev/null)
-      if [[ $code == 200 && -s $dir/in ]]; then
-        last=$(sha "$dir/in"); clog "Linux->Mac $(grep -i '^content-type' "$dir/hdr" | tr -d '\r' | cut -d' ' -f2) $(wc -c < "$dir/in" | tr -d ' ') bytes"
-        if grep -qi '^content-type: image/png' "$dir/hdr"; then
-          osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
-          info=$(osascript -e 'clipboard info' 2>/dev/null)
-        else
-          pbcopy < "$dir/in"; last_text=$(pbpaste 2>/dev/null | cksum)
-        fi
+      rm -f "$f"
+    done ) & w=$!
+  trap 'pkill -P $w 2>/dev/null; kill $w 2>/dev/null; clog stop; rm -rf "$dir"' EXIT
+  trap 'exit 0' TERM
+  # Linux -> Mac: ask for the host clipboard unless it's what we already have (304).
+  while sleep 0.6; do
+    n=$((n+1))
+    code=$(curl -sS -m 5 -H "$auth" -D "$dir/hdr" -o "$dir/in" -w '%{http_code}' "$url?have=$(cat "$dir/last" 2>/dev/null)" 2>/dev/null)
+    if [[ $code == 200 && -s $dir/in ]]; then
+      sha "$dir/in" > "$dir/last"; clog "Linux->Mac $(grep -i '^content-type' "$dir/hdr" | tr -d '\r' | cut -d' ' -f2) $(wc -c < "$dir/in" | tr -d ' ') bytes"
+      if grep -qi '^content-type: image/png' "$dir/hdr"; then
+        osascript -e "set the clipboard to (read (POSIX file \"$dir/in\") as «class PNGf»)" 2>/dev/null
+      else
+        pbcopy < "$dir/in"
       fi
     fi
     # Multi mode has no foreground Moonlight to wait on: stop once no Moonlight window is left.
-    if (( n > 60 && n % 20 == 0 )) && ! pgrep -xq Moonlight; then break; fi
+    if (( n > 15 && n % 5 == 0 )) && ! pgrep -xq Moonlight; then break; fi
   done
-  clog "stop"; rm -rf "$dir"
 }
 
 api() {  # POST to the host dashboard
@@ -252,7 +257,7 @@ audio_choice() {
   if grep -q '^AUDIO=' "$CONF"; then sed -i.bak "s/^AUDIO=.*/AUDIO=$AUDIO/" "$CONF" && rm -f "$CONF.bak"
   else echo "AUDIO=$AUDIO" >> "$CONF"; fi
 }
-case "${1:-all}" in all|virtual|multi) audio_choice ;; esac
+case "${1:-all}" in all|virtual|multi) [[ -n ${OMARCHY_MENU_AUDIO:-} ]] || audio_choice ;; esac
 [[ ${AUDIO:-mac} == host ]] && mouse+=(--audio-on-host)
 
 KEYS_HINT="Ctrl+Option+1-5: bring workspace here · Ctrl+Option+Q: disconnect"
@@ -266,6 +271,7 @@ case "${1:-all}" in
   all)
     stamp start; measure; stamp measured
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
+    [[ -n ${TOKEN:-} ]] && api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
     wifi_quiet; stamp moonlight; report all &
     clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
@@ -284,6 +290,7 @@ case "${1:-all}" in
       || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
     stamp screen_ready   # the host returns once Sunshine is listening; no fixed wait
     pair_once "$VIRTUAL_PORT" || true
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
     wifi_quiet; stamp moonlight; report virtual &
     clip_sync & clip=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
@@ -296,6 +303,7 @@ case "${1:-all}" in
   multi)
     need_token
     measure
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
     echo "Starting one stream per monitor on $HOST ..."
     api /api/multi/up >/dev/null || { echo "✘ host could not start the per-monitor streams"; exit 1; }
     sleep 3

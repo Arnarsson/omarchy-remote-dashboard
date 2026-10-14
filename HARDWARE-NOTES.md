@@ -188,3 +188,15 @@ instead of fixed sleeps; Mac's sleep 2 removed; the report includes a step timin
   whole session (shown with a minimal repro: dies at tick 1). Fix: `set +e +o pipefail` inside the loop, push always
   returns 0, Mac log ~/Library/Logs/omarchy-clipboard.log (sent to the host after each session), and the host log
   ~/.config/omarchy-stream/clipboard.log. Tests: multi tests isolated (stray clip loops polluted the suite), strays pkill'd on exit.
+
+## Session 6 (12:24): audio doubled, clipboard pasted the wrong item, still slow to launch
+- Audio: with --audio-on-host this Sunshine plays locally AND records the real sink's monitor ("sunshine-record",
+  Opus 512 kbps) and streams it, so the user heard Spotify on both. Fix: the Mac POSTs /api/audio/{host|mac}; the connect hook
+  spawns `audio-apply`, which mutes/unmutes Sunshine's pactl source-output (host speakers untouched).
+- Clipboard: host log showed only "Linux->Mac 1320 bytes" at 12:24:04. Connecting copied the Linux clipboard (an OAuth URL)
+  onto the Mac. Bug: initial state was pulled instead of just noted. No Mac->Linux transfer at all, presumably because Raycast
+  swaps the clipboard faster than 0.15 s polling. Fix: a long-running JXA watcher on NSPasteboard.changeCount (30 ms) grabs
+  text/PNG immediately; startup only records the host hash.
+- Timing: start=16s measured=18s screen_ready=21s moonlight=21s; Moonlight connected about 6 s later (was 29 s).
+  16 s before measuring = two dialogs + updates, so the sound choice moved into the menu (OMARCHY_MENU_AUDIO).
+- Moonlight logs to /tmp/Moonlight-*.log ("Redirecting log output to ..."); send_log now tails that file.

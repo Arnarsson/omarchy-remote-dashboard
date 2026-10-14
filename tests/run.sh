@@ -26,7 +26,12 @@ stub ping      'i=0; while [ $i -lt ${PINGS:-10} ]; do r=${RTT:-9}; [ -n "$SPIKE
   echo "64 bytes from 100.73.206.17: icmp_seq=$i ttl=64 time=$r ms"; i=$((i+1)); done'
 stub route     '[ -n "$WIFI" ] && echo "  interface: en0" || echo "  interface: en7"'
 stub networksetup 'printf "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: USB LAN\nDevice: en7\n"'
-stub osascript 'case "$*" in *"choose from list"*) echo "OSA $*" >> "$LOG"; if [ -s "$STATE/choices" ]; then head -1 "$STATE/choices"; sed -i 1d "$STATE/choices"; else echo "${CHOICE:-false}"; fi ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
+stub osascript 'case "$*" in *"choose from list"*) echo "OSA $*" >> "$LOG"; if [ -s "$STATE/choices" ]; then head -1 "$STATE/choices"; sed -i 1d "$STATE/choices"; else echo "${CHOICE:-false}"; fi ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;;
+  *"-l JavaScript"*) last=$(cksum < "$STATE/macclip" 2>/dev/null); k=0
+    while sleep 0.05; do c=$(cksum < "$STATE/macclip" 2>/dev/null)
+      if [ "$c" != "$last" ]; then last=$c; k=$((k+1)); cp "$STATE/macclip" "$4/t$k"; echo "text $4/t$k"; fi; done ;;
+  *) echo "OSA $*" >> "$LOG" ;; esac'
+stub pactl     'case "$*" in *"list source-outputs"*) echo "[{\"index\":7,\"properties\":{\"application.name\":\"sunshine\"}},{\"index\":8,\"properties\":{\"application.name\":\"obs\"}}]" ;; *) echo "pactl $*" >> "$LOG" ;; esac'
 stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING> mtu 1500"; exit 0'
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
@@ -232,6 +237,12 @@ curl -s -X POST "${A[@]}" -H "Content-Type: image/png" --data-binary @"$WORK/pic
 check "clipboard: pictures both ways"     'grep -q "^image/png$" "$STATE/cliptype" && curl -s -D "$WORK/h" -o "$WORK/back.png" "${A[@]}" localhost:$PORT/api/clipboard && cmp -s "$WORK/pic.png" "$WORK/back.png" && grep -qi "content-type: image/png" "$WORK/h"'
 check "clipboard needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/api/clipboard)" = 401 ]'
 check "path API answers for the caller"   'curl -s "${A[@]}" localhost:$PORT/api/path | grep -q "\"known\": false"'
+curl -s -X POST "${A[@]}" localhost:$PORT/api/audio/host >/dev/null
+check "audio pref stored"                 '[ "$(cat "$HOME/.config/omarchy-stream/audio.pref")" = host ]'
+: > "$LOG"; OMARCHY_SETTLE=0.1 "$CLI" audio-apply
+check "host audio: Sunshine copy muted"   'grep -q "pactl set-source-output-mute 7 1" "$LOG" && ! grep -q "mute 8" "$LOG"'
+curl -s -X POST "${A[@]}" localhost:$PORT/api/audio/mac >/dev/null; : > "$LOG"; OMARCHY_SETTLE=0.1 "$CLI" audio-apply
+check "Mac audio: Sunshine copy unmuted"  'grep -q "pactl set-source-output-mute 7 0" "$LOG"'
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -344,7 +355,7 @@ sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
 export CONNECT_SRC=$ROOT/mac/omarchy-connect LAUNCHER_SRC=$ROOT/mac/app/omarchy-remote
 stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *api/clipboard*-X*|*-X*api/clipboard*) [ -f "$STATE/curlfail" ] && { rm -f "$STATE/curlfail"; exit 7; } ;; esac
 case "$*" in *"--data-binary @-"*) cat >> "$LOG" ;; esac
-src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; esac
+src=; case "$*" in *mac/omarchy-connect*) src=$CONNECT_SRC ;; *mac/app/omarchy-remote*) src=$LAUNCHER_SRC ;; *-X*) ;; *api/clipboard*) [ -f "$STATE/hostclip" ] && src=$STATE/hostclip ;; esac
 [ -n "$src" ] && while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$src" "$2"; shift; done; exit 0'
 : > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi splits bitrate across 3"     '[ "$(grep -c "OPEN -n -a Moonlight" "$LOG")" = 3 ] && grep -q -- "--bitrate 20000" "$LOG"'
@@ -391,11 +402,14 @@ check "app: menu turns it back on"        'grep -q "^CLIPBOARD=1$" "$MH/.config/
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="echo 00:00:01 - Connecting to 100.73.206.17" "$L2"
 check "app: asks host for path (fast)"    'grep -q "CURL -fsS -m 2 .*/api/path" "$LOG"'
 check "app: sends Moonlight log after"    'grep -q "moonlight log (started at" "$LOG" && grep -q "00:00:01 - Connecting" "$LOG"'
-check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG"'
-: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
-check "app: sound on Omarchy speakers"    'grep -q -- "--audio-on-host" "$LOG" && grep -q "^AUDIO=host$" "$MH/.config/omarchy-stream/client.env"'
-: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
-check "app: remembers the sound choice"   'grep -q "default button \"Omarchy speakers\"" "$LOG"'
+check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG" && grep -q "/api/audio/mac" "$LOG" && grep -q "Sound: this Mac (switch to Omarchy)" "$LOG"'
+check "app: no separate sound dialog"     '! grep -q "Play sound on" "$LOG"'
+printf "Sound: this Mac (switch to Omarchy)\nScreen sized to this Mac\n" > "$STATE/choices"; : > "$LOG"; HOME=$MH "$L2"
+check "app: menu switches sound to host"  'grep -q "^AUDIO=host$" "$MH/.config/omarchy-stream/client.env" && grep -q "Sound: Omarchy speakers (switch to Mac)" "$LOG"'
+check "app: tells host, Moonlight agrees" 'grep -q "/api/audio/host" "$LOG" && grep -q -- "--audio-on-host" "$LOG"'
+echo "mine" > "$STATE/macclip"; echo "from linux" > "$STATE/hostclip"; : > "$LOG"
+HOME=$MH CHOICE="Screen sized to this Mac" ML_HOOK="sleep 0.8" "$L2"
+check "app: connect keeps Mac clipboard"  '[ "$(cat "$STATE/macclip")" = mine ]'; rm -f "$STATE/hostclip"
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 check "app: main monitor choice"          'grep -q "MOONLIGHT stream 100.73.206.17 Desktop --resolution" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE=false "$L2"

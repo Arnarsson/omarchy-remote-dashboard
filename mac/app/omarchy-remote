@@ -3,6 +3,7 @@
 # GUI only: dialogs and notifications instead of a terminal. Log: ~/Library/Logs/omarchy-remote.log
 export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"   # GUI apps start with a minimal PATH
 export OMARCHY_GUI=1
+export OMARCHY_MENU_AUDIO=1   # sound choice is a menu toggle here, so the client skips its dialog
 export OMARCHY_T0=$(date +%s)
 HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
 APPLOG="$HOME/Library/Logs/omarchy-remote.log"
@@ -26,12 +27,17 @@ while true; do
   # Settings toggles live in the same list; picking one flips it and shows the list again.
   CLIPBOARD=1; [[ -f $conf ]] && CLIPBOARD=$(grep -E '^CLIPBOARD=' "$conf" | tail -1 | cut -d= -f2); CLIPBOARD=${CLIPBOARD:-1}
   if [[ $CLIPBOARD == 1 ]]; then K="Clipboard sync: On (turn off)"; else K="Clipboard sync: Off (turn on)"; fi
-  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
+  AUDIO=mac; [[ -f $conf ]] && AUDIO=$(grep -E '^AUDIO=' "$conf" | tail -1 | cut -d= -f2); AUDIO=${AUDIO:-mac}
+  if [[ $AUDIO == host ]]; then S="Sound: Omarchy speakers (switch to Mac)"; else S="Sound: this Mac (switch to Omarchy)"; fi
+  choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\", \"$S\", \"$K\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
   case "$choice" in
     "$V") mode=virtual; break ;;
     "$M") mode=all; break ;;
     "$A") mode=multi; break ;;
     "$C") mode=check; break ;;
+    "$S") if [[ $AUDIO == host ]]; then new=mac; else new=host; fi
+          if grep -q '^AUDIO=' "$conf"; then sed -i.bak "s/^AUDIO=.*/AUDIO=$new/" "$conf" && rm -f "$conf.bak"
+          else echo "AUDIO=$new" >> "$conf"; fi ;;
     "$K") new=$(( 1 - CLIPBOARD ))
           if grep -q '^CLIPBOARD=' "$conf"; then sed -i.bak "s/^CLIPBOARD=.*/CLIPBOARD=$new/" "$conf" && rm -f "$conf.bak"
           else echo "CLIPBOARD=$new" >> "$conf"; fi ;;

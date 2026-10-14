@@ -540,6 +540,30 @@ def cmd_disconnect(_args):
     return 0
 
 
+AUDIO_PREF = STATE_DIR / "audio.pref"
+
+
+def cmd_audio_apply(_args):
+    """With sound on the host, Sunshine still records the speakers and streams them to the client:
+    you'd hear everything twice. Mute Sunshine's recording stream instead (host speakers untouched)."""
+    want_mute = AUDIO_PREF.exists() and AUDIO_PREF.read_text().strip() == "host"
+    done, deadline = set(), time.time() + 20 * SETTLE
+    while time.time() < deadline:
+        out, code = run(["pactl", "-f", "json", "list", "source-outputs"])
+        try:
+            streams = json.loads(out) if code == 0 else []
+        except json.JSONDecodeError:
+            streams = []
+        for st in streams:
+            if (st.get("properties") or {}).get("application.name") == "sunshine" and st["index"] not in done:
+                run(["pactl", "set-source-output-mute", str(st["index"]), "1" if want_mute else "0"])
+                done.add(st["index"])
+        if done and time.time() > deadline - 15 * SETTLE:
+            break  # found it; a few extra seconds covered late streams
+        time.sleep(0.25)
+    return 0
+
+
 def lock_session():
     """Omarchy locks via omarchy-system-lock (omarchy-shell); hypridle may not be running to
     act on logind's Lock signal. From a service, name the graphical session explicitly."""
@@ -571,6 +595,9 @@ def cmd_hook(args):
         if cfg["stream_keys"]:
             stream_keys(True)
             state["keys"] = True
+        # Sunshine opens its recording stream just after this hook; mute/unmute it in the background.
+        subprocess.Popen([str(APP_DIR / "omarchy-stream"), "audio-apply"], start_new_session=True,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         SESSION_FILE.write_text(json.dumps(state))
         return 0
     try:
@@ -1061,6 +1088,11 @@ def make_handler(token):
                 with open(STATE_DIR / "client-report.log", "a") as f:
                     f.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} from {self.client_address[0]}\n{text}\n")
                 return self.send(200, {"ok": True})
+            m = re.fullmatch(r"/api/audio/(host|mac)", self.path)
+            if m:  # where the client wants sound for the next session
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                AUDIO_PREF.write_text(m.group(1))
+                return self.send(200, {"ok": True, "audio": m.group(1)})
             m = re.fullmatch(r"/api/pair/(\d{4,5})/(\d{4})", self.path)
             if m:
                 ok, msg = pair_instance(int(m.group(1)), m.group(2))
@@ -1131,6 +1163,7 @@ def main():
     v = sub.add_parser("virtual"); v.add_argument("spec"); v.set_defaults(fn=cmd_virtual)
     sub.add_parser("mac", help="print the one-line Mac setup command").set_defaults(fn=cmd_mac)
     sub.add_parser("disconnect", help="end all running streams").set_defaults(fn=cmd_disconnect)
+    sub.add_parser("audio-apply", help=argparse.SUPPRESS).set_defaults(fn=cmd_audio_apply)
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, help="default: dashboard_port in config.json (8080)")
     s.add_argument("--local-only", action="store_true"); s.set_defaults(fn=cmd_serve)
     a = p.parse_args()
