@@ -604,6 +604,31 @@ def set_output_mode(name, w, h, hz, scale):
     return False
 
 
+LAYOUT_FILE = STATE_DIR / "layout.json"
+
+
+def save_layout():
+    """Which workspace each physical monitor shows, so switching on the virtual screen can be undone."""
+    if LAYOUT_FILE.exists():
+        return
+    layout = {m["name"]: str((m.get("activeWorkspace") or {}).get("id", ""))
+              for m in hypr_monitors() if m["name"] != VIRTUAL_NAME}
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    LAYOUT_FILE.write_text(json.dumps(layout))
+
+
+def restore_layout():
+    try:
+        layout = json.loads(LAYOUT_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return
+    for mon, ws in layout.items():
+        if ws and not ws.startswith("-"):
+            run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ monitor = "{mon}" }}))'])
+            run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ workspace = "{ws}", on_current_monitor = true }}))'])
+    LAYOUT_FILE.unlink(missing_ok=True)
+
+
 def cmd_virtual(args):
     """Parsec-style virtual display: a headless Hyprland output sized to the client."""
     d = INSTANCES_DIR / "virtual"
@@ -616,6 +641,8 @@ def cmd_virtual(args):
             time.sleep(0.25)
         run(["systemctl", "--user", "stop", "sunshine@virtual"], timeout=20)
         run(["hyprctl", "output", "remove", VIRTUAL_NAME])
+        time.sleep(2 * SETTLE)  # hotplug `hyprctl reload` first, then put workspaces back
+        restore_layout()
         print("virtual display removed")
         return 0
     m = re.fullmatch(r"(\d{3,5})x(\d{3,5})(?:@(\d{2,3}))?(?:,([\d.]+))?", args.spec)
@@ -624,6 +651,7 @@ def cmd_virtual(args):
         return 2
     w, h, hz, scale = m.group(1), m.group(2), m.group(3) or "60", m.group(4) or "1"
     if not any(x["name"] == VIRTUAL_NAME for x in hypr_monitors()):
+        save_layout()
         _, code = run(["hyprctl", "output", "create", "headless", VIRTUAL_NAME])
         if code != 0:
             print("hyprctl could not create a headless output (needs Hyprland >= 0.41)")
@@ -739,6 +767,7 @@ def mac_client_env(token, dash_port):
         "FPS": 60,
         "MAX_BITRATE_KBPS": 60000,
         "CODEC": "HEVC",
+        "AUDIO": "mac",    # mac = streamed to the Mac, host = play on this PC's speakers
         "SHOW_STATS": 1,   # Moonlight stats overlay (Ctrl+Alt+Shift+S toggles)
         "AWDL_OFF": 1,     # pause AirDrop while streaming (Wi-Fi lag spikes)
         "MULTI_PORTS": '"' + " ".join(map(str, ports)) + '"',
@@ -878,6 +907,13 @@ def make_handler(token):
                     code = cmd_virtual(argparse.Namespace(spec=m.group(1)))
                 return self.send(200 if code == 0 else 500, {"ok": code == 0, "message": buf.getvalue().strip(),
                                                               "port": VIRTUAL_PORT})
+            if self.path == "/api/report":  # Mac diagnostics, so problems can be read here
+                n = min(int(self.headers.get("Content-Length") or 0), 16384)
+                text = self.rfile.read(n).decode(errors="replace")
+                STATE_DIR.mkdir(parents=True, exist_ok=True)
+                with open(STATE_DIR / "client-report.log", "a") as f:
+                    f.write(f"=== {time.strftime('%Y-%m-%d %H:%M:%S')} from {self.client_address[0]}\n{text}\n")
+                return self.send(200, {"ok": True})
             m = re.fullmatch(r"/api/pair/(\d{4,5})/(\d{4})", self.path)
             if m:
                 ok, msg = pair_instance(int(m.group(1)), m.group(2))

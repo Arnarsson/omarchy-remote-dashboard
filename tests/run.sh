@@ -22,7 +22,9 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
 stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
-stub osascript 'case "$*" in *"choose from list"*) echo "${CHOICE:-false}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
+stub route     '[ -n "$WIFI" ] && echo "  interface: en0" || echo "  interface: en7"'
+stub networksetup 'printf "Hardware Port: Wi-Fi\nDevice: en0\n\nHardware Port: USB LAN\nDevice: en7\n"'
+stub osascript 'case "$*" in *"choose from list"*) echo "${CHOICE:-false}" ;; *"Play sound on"*) echo "OSA $*" >> "$LOG"; echo "${AUDIO_PICK:-This Mac}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
 stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING> mtu 1500"; exit 0'
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
@@ -37,7 +39,7 @@ echo "{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.73.206.17\
 stub hyprctl '
 echo "hyprctl $*" >> "$LOG"
 case "$1" in
-  monitors) printf "[{\"name\":\"HDMI-A-2\",\"width\":1920,\"height\":1080,\"refreshRate\":60.0,\"x\":0,\"y\":0,\"scale\":1},{\"name\":\"DP-2\",\"width\":1920,\"height\":1080,\"refreshRate\":144.0,\"x\":1920,\"y\":0,\"scale\":1},{\"name\":\"DP-1\",\"width\":1920,\"height\":1080,\"refreshRate\":144.0,\"x\":3840,\"y\":0,\"scale\":1}"
+  monitors) printf "[{\"name\":\"HDMI-A-2\",\"width\":1920,\"height\":1080,\"refreshRate\":60.0,\"x\":0,\"y\":0,\"scale\":1},{\"name\":\"DP-2\",\"activeWorkspace\":{\"id\":2},\"width\":1920,\"height\":1080,\"refreshRate\":144.0,\"x\":1920,\"y\":0,\"scale\":1},{\"name\":\"DP-1\",\"width\":1920,\"height\":1080,\"refreshRate\":144.0,\"x\":3840,\"y\":0,\"scale\":1}"
             vm=$(cat "$STATE/vmode" 2>/dev/null || echo 3024x1964)
             [ -f "$STATE/virtual" ] && printf ",{\"name\":\"OS-VIRTUAL\",\"width\":${vm%%x*},\"height\":${vm##*x},\"refreshRate\":60.0,\"x\":5760,\"y\":0,\"scale\":2}"
             echo "]" ;;
@@ -175,6 +177,7 @@ echo '{}' > "$HOME/.config/omarchy-stream/session.json"
 ( sleep 0.6; rm -f "$HOME/.config/omarchy-stream/session.json" ) &
 t0=$(date +%s%N); OMARCHY_SETTLE=1 "$CLI" virtual off >/dev/null; t1=$(date +%s%N)
 check "virtual off waits for the hook"    '[ $(( (t1 - t0) / 1000000 )) -ge 500 ]'
+check "virtual off restores the layout"   'grep -q "hl.dsp.focus({ monitor = \"DP-2\" })" "$LOG" && [ ! -f "$HOME/.config/omarchy-stream/layout.json" ]'
 check "virtual off removes output"        'grep -q "hyprctl output remove OS-VIRTUAL" "$LOG"'
 
 # --------------------------------------------------------------------------- dashboard API
@@ -198,6 +201,9 @@ check "bad virtual via API rejected"      '[ "$(curl -s -o /dev/null -w %{http_c
 check "API multi up starts instances"     'grep -q "start sunshine@DP-2" "$LOG"'
 : > "$LOG"; curl -s -X POST "${A[@]}" localhost:$PORT/api/multi/down >/dev/null
 check "API multi down restores main"      'grep -q "stop sunshine@DP-2" "$LOG" && grep -q "systemctl --user start sunshine$" "$LOG"'
+curl -s -X POST "${A[@]}" --data-binary "mode=virtual relayed=no rtt=4ms" localhost:$PORT/api/report >/dev/null
+check "host stores Mac reports"           'grep -q "mode=virtual relayed=no rtt=4ms" "$HOME/.config/omarchy-stream/client-report.log"'
+check "report needs the token"            '[ "$(curl -s -o /dev/null -w %{http_code} -X POST --data-binary x localhost:$PORT/api/report)" = 401 ]'
 check "mac setup needs the token"         '[ "$(curl -s -o /dev/null -w %{http_code} localhost:$PORT/mac/setup)" = 401 ]'
 MH=$(mktemp -d -p "$WORK")
 curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
@@ -297,6 +303,7 @@ check "10% loss: 70%"                     '[ "$(bitrate RTT=9 PINGS=9)" = 42000 
 check "20% loss: 40%"                     '[ "$(bitrate RTT=9 PINGS=8)" = 24000 ]'
 check "very slow/lossy: 40%"              '[ "$(bitrate RTT=90)" = 24000 ]'
 check "relayed: 25%"                      '[ "$(bitrate RELAY=1)" = 15000 ]'
+check "Wi-Fi caps bitrate at 25 Mbps"     '[ "$(bitrate RTT=9 WIFI=1)" = 25000 ]'
 check "Wi-Fi spikes: 40%"                 '[ "$(bitrate RTT=4 SPIKE=130)" = 24000 ]'
 check "small spikes: 70%"                 '[ "$(bitrate RTT=4 SPIKE=25)" = 42000 ]'
 check "capture mouse (one cursor) + stats" 'grep -q -- "--no-absolute-mouse --performance-overlay" "$LOG"'
@@ -316,6 +323,7 @@ check "multi: one size per monitor"       'grep -q "48189 Desktop --resolution 3
 : > "$LOG"; "$MC" virtual >/dev/null
 check "virtual sized to Mac display"      'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q -- "--resolution 3024x1964" "$LOG" && grep -q "omarchy:48989" "$LOG"'
 check "virtual removed after session"     'grep -q "api/virtual/off" "$LOG"'
+check "Mac reports diagnostics to host"   'grep -q "CURL .*--data-binary @- http://omarchy:8080/api/report" "$LOG"'
 check "virtual pairs itself once"         'grep -q "api/pair/48989/[0-9]\{4\}" "$LOG" && grep -q "MOONLIGHT pair omarchy:48989 --pin" "$LOG" && [ -f "$HOME/.config/omarchy-stream/paired.48989" ]'
 : > "$LOG"; "$MC" virtual >/dev/null
 check "already paired: no pairing again"  '! grep -q "api/pair" "$LOG"'
@@ -329,6 +337,12 @@ echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
 check "app: self-updates its client"      'cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && grep -q "CURL .*/mac/omarchy-connect" "$LOG"'
 check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
 check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
+: > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
+check "app: sound on Mac by default"      '! grep -q -- "--audio-on-host" "$LOG"'
+: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
+check "app: sound on Omarchy speakers"    'grep -q -- "--audio-on-host" "$LOG" && grep -q "^AUDIO=host$" "$MH/.config/omarchy-stream/client.env"'
+: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" AUDIO_PICK="Omarchy speakers" "$L2"
+check "app: remembers the sound choice"   'grep -q "default button \"Omarchy speakers\"" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
 check "app: main monitor choice"          'grep -q "MOONLIGHT stream 100.73.206.17 Desktop --resolution" "$LOG"'
 : > "$LOG"; HOME=$MH CHOICE=false "$L2"

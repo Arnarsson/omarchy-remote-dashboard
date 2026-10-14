@@ -146,3 +146,10 @@ omarchy-shell journal: 10:52:16.82 "lock-requested", 10:52:17.39 "secure=true" (
 "Authenticated successfully", then "unlocked" (a password was typed at the desk). `omarchy-shell lock status` / `isLocked`
 can be queried. Race found: the hook ran while `virtual off` was already stopping sunshine@virtual (it won by 1.7 s).
 `virtual off` now waits for session.json to disappear (the hook finished) before stopping the instance.
+
+## Session 3 (11:09, virtual): "much better, just one mouse, still some bandwidth issues, laggy with audio"
+- One cursor confirmed by the user. Ctrl+Option+N switching was used (OS-VIRTUAL showed ws 2, physical monitors reshuffled).
+- Host to Mac pings during the stream still spike: 2-3 ms baseline with bursts of 131/108/86/62 ms. Mac Wi-Fi side.
+Changes: on Wi-Fi the bitrate ceiling is 25 Mbps (WIFI_MAX_BITRATE_KBPS); the Mac POSTs diagnostics (path, awdl state, PHY/channel/
+signal/noise/tx rate) to /api/report -> ~/.config/omarchy-stream/client-report.log; AUDIO=mac|host with the app asking
+each connect (--audio-on-host); `virtual off` restores the physical monitors' workspaces (layout.json).

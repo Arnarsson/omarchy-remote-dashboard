@@ -55,7 +55,10 @@ measure() {
   elif (( median > 60 || loss > 10 || spike > 40 )); then factor=40
   elif (( median > 25 || loss > 0 || spike > 15 )); then factor=70
   fi
-  BITRATE=$(( MAX_BITRATE_KBPS * factor / 100 ))
+  local max=$MAX_BITRATE_KBPS
+  if on_wifi && (( max > ${WIFI_MAX_BITRATE_KBPS:-25000} )); then max=${WIFI_MAX_BITRATE_KBPS:-25000}; fi
+  BITRATE=$(( max * factor / 100 ))
+  PATH_LINE="relayed=$relayed rtt=${median}ms p90=${p90}ms loss=${loss}% wifi=$(on_wifi && echo yes || echo no) -> ${BITRATE}kbps"
   printf 'path: %s  rtt %sms  spikes +%sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
     "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$spike" "$loss" $(( BITRATE / 1000 )) "$factor"
   notify "$([[ $relayed == yes ]] && echo 'Relayed connection' || echo 'Direct connection'), $(( BITRATE / 1000 )) Mbps"
@@ -68,6 +71,26 @@ measure() {
 mac_resolution() {
   system_profiler SPDisplaysDataType 2>/dev/null \
     | awk '/Resolution:/ {gsub(/ /,""); split($0,a,":"); split(a[2],r,/[^0-9x]/); print r[1]; exit}'
+}
+
+# Wi-Fi or cable? Wi-Fi gets a lower ceiling: bursts of delay hurt more at high bitrates.
+on_wifi() {
+  local ifc; ifc=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+  [[ -n $ifc ]] && networksetup -listallhardwareports 2>/dev/null | grep -A1 -E 'Wi-Fi|AirPort' | grep -q "Device: $ifc"
+}
+
+# Send Wi-Fi diagnostics to the host (~/.config/omarchy-stream/client-report.log there).
+report() {
+  [[ -n ${TOKEN:-} ]] || return 0
+  {
+    echo "mode=$1 ${PATH_LINE:-}"
+    echo "awdl: $(ifconfig awdl0 2>/dev/null | head -1)"
+    sw_vers 2>/dev/null | tr '\n' ' '; echo
+    system_profiler SPAirPortDataType 2>/dev/null \
+      | awk '/Current Network Information:/{f=1; next} f&&/Other Local Wi-Fi Networks:/{exit} f' \
+      | grep -E 'PHY Mode|Channel|Signal / Noise|Transmit Rate|MCS|Security' | head -8
+  } | curl -fsS -m 5 -X POST -H "Authorization: Bearer $TOKEN" --data-binary @- \
+      "http://$HOST:$DASHBOARD_PORT/api/report" >/dev/null 2>&1 || true
 }
 
 # Notification when run from Omarchy Remote.app (no terminal to print to).
@@ -120,6 +143,20 @@ need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the s
 # Release the mouse: Ctrl+Option+Shift+Z. MOUSE=absolute in client.env for the Mac's own cursor instead.
 if [[ ${MOUSE:-capture} == absolute ]]; then mouse=(--absolute-mouse); else mouse=(--no-absolute-mouse); fi
 [[ ${SHOW_STATS:-1} == 1 ]] && mouse+=(--performance-overlay)
+# Where sound plays: this Mac (streamed) or the host's own speakers (Moonlight --audio-on-host).
+# The app asks each time, defaulting to the last choice; Terminal users set AUDIO=mac|host in client.env.
+audio_choice() {
+  [[ -n ${OMARCHY_GUI:-} ]] || return 0
+  local last="This Mac" pick
+  [[ ${AUDIO:-mac} == host ]] && last="Omarchy speakers"
+  pick=$(osascript -e "button returned of (display dialog \"Play sound on:\" with title \"Omarchy Remote\" buttons {\"This Mac\", \"Omarchy speakers\"} default button \"$last\")" 2>/dev/null) || return 0
+  if [[ $pick == "Omarchy speakers" ]]; then AUDIO=host; else AUDIO=mac; fi
+  if grep -q '^AUDIO=' "$CONF"; then sed -i.bak "s/^AUDIO=.*/AUDIO=$AUDIO/" "$CONF" && rm -f "$CONF.bak"
+  else echo "AUDIO=$AUDIO" >> "$CONF"; fi
+}
+case "${1:-all}" in all|virtual|multi) audio_choice ;; esac
+[[ ${AUDIO:-mac} == host ]] && mouse+=(--audio-on-host)
+
 KEYS_HINT="Ctrl+Option+1-5: bring workspace here · Ctrl+Option+Q: disconnect"
 
 common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen "${mouse[@]}")
@@ -129,7 +166,7 @@ case "${1:-all}" in
   all)
     measure
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
-    wifi_quiet
+    wifi_quiet; report all &
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
     wifi_restore ;;
@@ -144,7 +181,7 @@ case "${1:-all}" in
       || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
     sleep 2
     pair_once "$VIRTUAL_PORT" || true
-    wifi_quiet
+    wifi_quiet; report virtual &
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
     wifi_restore
