@@ -47,7 +47,8 @@ case "$1" in
            [ "$2" = misc:vrr ] && echo "$3" > "$STATE/vrr"
            [ "$2" = cursor:invisible ] && echo "$3" > "$STATE/cursor"
            [ "$2" = monitor ] && echo "$3" | cut -d, -f2 | cut -d@ -f1 > "$STATE/vmode"; echo ok ;;
-  eval) case "$2" in
+  eval) [ -n "$LEGACY" ] && { echo "unknown request"; exit 0; }
+        case "$2" in
           *"mode ="*) echo "$2" | sed -n "s/.*mode = \"\([0-9]*x[0-9]*\)@.*/\1/p" > "$STATE/vmode" ;;
           *"invisible ="*) echo "$2" | sed -n "s/.*invisible = \([a-z]*\).*/\1/p" > "$STATE/cursor" ;;
           *"vrr ="*) echo "$2" | sed -n "s/.*vrr = \([0-9]*\).*/\1/p" > "$STATE/vrr" ;;
@@ -111,12 +112,21 @@ check "disconnect restores VRR"           '[ "$(cat "$STATE/vrr")" = 2 ]'
 check "disconnect locks via Omarchy"      'grep -q "OMARCHY-LOCK" "$LOG"'
 : > "$LOG"; "$CLI" hook connect; LOCK_FAIL=1 "$CLI" hook disconnect
 check "lock falls back to logind session" 'grep -q "loginctl lock-session 2$" "$LOG"'
+check "cursor left alone by default"      '[ "$(cat "$STATE/cursor" 2>/dev/null || echo false)" = false ]'
+echo '{"hide_host_cursor_while_streaming": true}' > "$HOME/.config/omarchy-stream/config.json"
 echo false > "$STATE/cursor"; "$CLI" hook connect
 check "connect hides the host cursor"     '[ "$(cat "$STATE/cursor")" = true ]'
 "$CLI" hook disconnect
 check "disconnect shows the cursor again" '[ "$(cat "$STATE/cursor")" = false ]'
 echo true > "$STATE/cursor"; "$CLI" hook connect; "$CLI" hook disconnect
 check "cursor hidden by user stays hidden" '[ "$(cat "$STATE/cursor")" = true ]'; echo false > "$STATE/cursor"
+echo '{}' > "$HOME/.config/omarchy-stream/config.json"
+: > "$LOG"; "$CLI" hook connect
+check "connect adds stream keys"          'grep -q "hyprctl eval hl.bind(\"CTRL + ALT + 1\", hl.dsp.focus({ workspace = \"1\", on_current_monitor = true })" "$LOG" && grep -q "hl.bind(\"CTRL + ALT + Q\", hl.dsp.exec_cmd(\".*omarchy-stream disconnect\")" "$LOG"'
+: > "$LOG"; "$CLI" hook disconnect
+check "disconnect removes stream keys"    '[ "$(grep -c "hl.unbind(\"CTRL + ALT" "$LOG")" = 6 ]'
+: > "$LOG"; LEGACY=1 "$CLI" hook connect; LEGACY=1 "$CLI" hook disconnect
+check "legacy Hyprland: keyword binds"    'grep -q "hyprctl keyword bind CTRL ALT,3,focusworkspaceoncurrentmonitor,3" "$LOG" && grep -q "hyprctl keyword unbind CTRL ALT,Q" "$LOG"'
 echo 2 > "$STATE/vrr"; LUA=1 "$CLI" hook connect
 check "Lua Hyprland: VRR off via eval"    '[ "$(cat "$STATE/vrr")" = 0 ]'
 LUA=1 "$CLI" hook disconnect
@@ -150,6 +160,7 @@ check "virtual sets mode and scale"       'grep -q "OS-VIRTUAL,3024x1964@60,auto
 check "virtual instance logs at info"     'grep -q "min_log_level = info" "$I/virtual/sunshine.conf"'
 check "virtual uses wlr capture"          'grep -q "capture = wlr" "$I/virtual/sunshine.conf" && grep -q "output_name = OS-VIRTUAL" "$I/virtual/sunshine.conf"'
 check "virtual starts its instance"       'grep -q "restart sunshine@virtual" "$LOG"'
+check "virtual opens on workspace 1"       'grep -q "hl.dsp.focus({ monitor = \"OS-VIRTUAL\" })" "$LOG" && grep -q "hl.dsp.focus({ workspace = \"1\", on_current_monitor = true })" "$LOG"'
 check "virtual instance gets web login"   '[ "$(stat -c %a "$I/virtual/webcreds")" = 600 ] && grep -q "sunshine $I/virtual/sunshine.conf --creds omarchy" "$LOG"'
 "$CLI" virtual off >/dev/null; : > "$LOG"
 LUA=1 "$CLI" virtual 2560x1664@60,2 >/dev/null
@@ -223,6 +234,11 @@ for _ in $(seq 20); do curl -s "localhost:$PORT/api/ping" >/dev/null && curl -s 
 code=$(curl -s -o /dev/null -w %{http_code} -X POST "${A[@]}" localhost:$PORT/api/pair/$FP/4321)
 check "host submits the PIN"              '[ "$code" = 200 ] && python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d==dict(pairing_id=\"a\"*32, pin=\"4321\", name=\"Mac\"), d" "$WORK/pinpost"'
 check "pair on unknown port fails"        '[ "$(curl -s -o /dev/null -w %{http_code} -X POST "${A[@]}" localhost:$PORT/api/pair/11111/4321)" = 500 ]'
+rm -f "$WORK/pinpost"; : > "$LOG"
+ACTIVE_UNIT=sunshine@fake OMARCHY_SUNSHINE_SCHEME=http "$CLI" disconnect
+check "disconnect closes instance stream" '[ "$(cat "$WORK/pinpost")" = "{}" ] && ! grep -q "restart sunshine$" "$LOG"'
+: > "$LOG"; ACTIVE_UNIT=sunshine "$CLI" disconnect
+check "disconnect ends the main stream"   'grep -q "systemctl --user restart sunshine$" "$LOG"'
 kill $SRV $FAKE 2>/dev/null; wait $SRV $FAKE 2>/dev/null; rm -rf "$I/fake"
 
 # --------------------------------------------------------------------------- non-default host
@@ -280,14 +296,15 @@ check "very slow/lossy: 40%"              '[ "$(bitrate RTT=90)" = 24000 ]'
 check "relayed: 25%"                      '[ "$(bitrate RELAY=1)" = 15000 ]'
 check "Wi-Fi spikes: 40%"                 '[ "$(bitrate RTT=4 SPIKE=130)" = 24000 ]'
 check "small spikes: 70%"                 '[ "$(bitrate RTT=4 SPIKE=25)" = 42000 ]'
-check "Mac cursor mode + stats overlay"   'grep -q -- "--absolute-mouse --performance-overlay" "$LOG"'
+check "capture mouse (one cursor) + stats" 'grep -q -- "--no-absolute-mouse --performance-overlay" "$LOG"'
 check "AirDrop paused and restored"       'grep -q "sudo -n /sbin/ifconfig awdl0 down" "$LOG" && grep -q "sudo -n /sbin/ifconfig awdl0 up" "$LOG"'
 check "unreachable host fails clearly"    '! PINGS=0 "$MC" all >/dev/null'
 check "all-monitors native resolution"    'grep -q -- "--resolution 5760x1080" "$LOG"'
 check "virtual needs a token"             '! "$MC" virtual >/dev/null'
 check "multi needs a token"               '! "$MC" multi >/dev/null'
 sed -i 's/^TOKEN=.*/TOKEN=t/' "$HOME/.config/omarchy-stream/client.env"
-stub curl 'echo "CURL $*" >> "$LOG"'
+export CONNECT_SRC=$ROOT/mac/omarchy-connect
+stub curl 'echo "CURL $*" >> "$LOG"; case "$*" in *mac/omarchy-connect*) while [ $# -gt 0 ]; do [ "$1" = -o ] && cp "$CONNECT_SRC" "$2"; shift; done ;; esac'
 : > "$LOG"; "$MC" multi >/dev/null
 check "multi splits bitrate across 3"     '[ "$(grep -c "OPEN -n -a Moonlight" "$LOG")" = 3 ] && grep -q -- "--bitrate 20000" "$LOG"'
 sed -i 's/^MONITOR_RES=.*/MONITOR_RES="1920x1080 3440x1440 1920x1080"/' "$HOME/.config/omarchy-stream/client.env"
@@ -304,7 +321,9 @@ check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'
 section "Mac app (Omarchy Remote.app)"
 L2="$APPB/Contents/MacOS/omarchy-remote"
+echo "# old" > "$APPB/Contents/Resources/omarchy-connect"
 : > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" "$L2"
+check "app: self-updates its client"      'cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && grep -q "CURL .*/mac/omarchy-connect" "$LOG"'
 check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
 check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
 : > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"

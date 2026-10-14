@@ -8,6 +8,7 @@ Subcommands:
   virtual WxH[@HZ][,S]   Parsec-style virtual display sized to the client (or 'off').
   hook connect|disconnect  Called by Sunshine: VRR off while streaming, lock on disconnect.
   mac                    Print the one-line Mac setup command.
+  disconnect             End all running streams (bound to Ctrl+Alt+Q while streaming).
   serve                  Run the dashboard/API (Tailscale + localhost only, token auth).
 
 Standard library only. Linux host side.
@@ -42,7 +43,9 @@ SESSION_FILE = STATE_DIR / "session.json"
 DEFAULT_CONFIG = {
     "disable_vrr_while_streaming": True,   # VRR makes captured frame timing uneven
     "lock_on_disconnect": True,            # don't leave the desktop open at home
-    "hide_host_cursor_while_streaming": True,  # Moonlight shows the Mac's own cursor; a second, lagging one is noise
+    # Off by default: Moonlight runs in capture mode (host cursor only). Hiding it left no cursor at all.
+    "hide_host_cursor_while_streaming": False,
+    "stream_keys": True,                   # Ctrl+Alt+1..5 bring workspace N here, Ctrl+Alt+Q disconnects
     "sunshine_unit": "sunshine",           # user unit of the main (all-monitors) Sunshine; install.sh detects it
     "sunshine_bin": "",                    # Sunshine binary that unit runs; empty = first on PATH
     "dashboard_port": 8080,
@@ -498,6 +501,43 @@ def set_hypr_option(name, value):
         run(["hyprctl", "eval", f"hl.config({{ {section} = {{ {key} = {text} }} }})"])
 
 
+STREAM_KEYS = [(f"CTRL + ALT + {n}", f'hl.dsp.focus({{ workspace = "{n}", on_current_monitor = true }})',
+                f"CTRL ALT,{n},focusworkspaceoncurrentmonitor,{n}") for n in range(1, 6)]
+
+
+def stream_keys(on):
+    """Bindings that only exist while a stream is up. Lua configs take `eval`; legacy ones `keyword`."""
+    me = APP_DIR / "omarchy-stream"
+    keys = STREAM_KEYS + [("CTRL + ALT + Q", f'hl.dsp.exec_cmd("{me} disconnect")', f"CTRL ALT,Q,exec,{me} disconnect")]
+    for lua_keys, lua_dsp, legacy in keys:
+        if on:
+            out, code = run(["hyprctl", "eval", f'hl.bind("{lua_keys}", {lua_dsp}, {{ description = "omarchy-stream" }})'])
+            if code != 0 or out.strip() != "ok":
+                run(["hyprctl", "keyword", "bind", legacy])
+        else:
+            out, code = run(["hyprctl", "eval", f'hl.unbind("{lua_keys}")'])
+            if code != 0 or out.strip() != "ok":
+                run(["hyprctl", "keyword", "unbind", ",".join(legacy.split(",")[:2])])
+
+
+def cmd_disconnect(_args):
+    """End every running stream: instances via their Sunshine API, the main unit by restarting it."""
+    closed = False
+    for n in instance_names():
+        if service_state(f"sunshine@{n}") != "active":
+            continue
+        closed = True
+        d = INSTANCES_DIR / n
+        try:
+            pw = (d / "webcreds").read_text().strip()
+            sunshine_api(int(read_conf(d / "sunshine.conf").get("port", 0)) + 1, "POST", "/api/apps/close", pw, {})
+        except (OSError, ValueError):
+            run(["systemctl", "--user", "restart", f"sunshine@{n}"], timeout=20)
+    if not closed and service_state(main_unit()) == "active":
+        run(["systemctl", "--user", "restart", main_unit()], timeout=20)
+    return 0
+
+
 def lock_session():
     """Omarchy locks via omarchy-system-lock (omarchy-shell); hypridle may not be running to
     act on logind's Lock signal. From a service, name the graphical session explicitly."""
@@ -526,6 +566,9 @@ def cmd_hook(args):
         if cfg["hide_host_cursor_while_streaming"] and hypr_option("cursor:invisible") is False:
             state["cursor_hidden"] = True
             set_hypr_option("cursor:invisible", True)
+        if cfg["stream_keys"]:
+            stream_keys(True)
+            state["keys"] = True
         SESSION_FILE.write_text(json.dumps(state))
         return 0
     try:
@@ -536,6 +579,8 @@ def cmd_hook(args):
         set_hypr_option("misc:vrr", state["vrr"])
     if state.get("cursor_hidden"):
         set_hypr_option("cursor:invisible", False)
+    if state.get("keys"):
+        stream_keys(False)
     SESSION_FILE.unlink(missing_ok=True)
     if cfg["lock_on_disconnect"]:
         lock_session()
@@ -602,6 +647,9 @@ def cmd_virtual(args):
     if not (d / "apps.json").exists():
         (d / "apps.json").write_text(json.dumps({"env": {}, "apps": [{"name": "Desktop"}]}, indent=2))
     ensure_webcreds(d)
+    # Start on the main workspace instead of an empty desktop (Ctrl+Alt+1..5 switch while streaming).
+    run(["hyprctl", "eval", f'hl.dispatch(hl.dsp.focus({{ monitor = "{VIRTUAL_NAME}" }}))'])
+    run(["hyprctl", "eval", 'hl.dispatch(hl.dsp.focus({ workspace = "1", on_current_monitor = true }))'])
     _, code = run(["systemctl", "--user", "restart", "sunshine@virtual"], timeout=20)
     print(f"virtual display {w}x{h}@{hz} scale {scale} on port {VIRTUAL_PORT}"
           f" ({'running' if code == 0 else 'failed to start sunshine@virtual'})")
@@ -793,6 +841,8 @@ def make_handler(token):
                 return self.send(200, status())
             if self.path == "/api/doctor":
                 return self.send(200, cmd_doctor_results())
+            if self.path == "/mac/omarchy-connect":  # the app self-updates from here
+                return self.send(200, (APP_DIR / "mac/omarchy-connect").read_bytes(), "text/x-shellscript")
             if self.path == "/mac/setup":
                 port = self.server.server_address[1]
                 return self.send(200, mac_setup_script(token, port).encode(), "text/x-shellscript")
@@ -892,6 +942,7 @@ def main():
     h = sub.add_parser("hook"); h.add_argument("event", choices=["connect", "disconnect"]); h.set_defaults(fn=cmd_hook)
     v = sub.add_parser("virtual"); v.add_argument("spec"); v.set_defaults(fn=cmd_virtual)
     sub.add_parser("mac", help="print the one-line Mac setup command").set_defaults(fn=cmd_mac)
+    sub.add_parser("disconnect", help="end all running streams").set_defaults(fn=cmd_disconnect)
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, help="default: dashboard_port in config.json (8080)")
     s.add_argument("--local-only", action="store_true"); s.set_defaults(fn=cmd_serve)
     a = p.parse_args()

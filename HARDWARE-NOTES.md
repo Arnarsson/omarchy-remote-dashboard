@@ -128,3 +128,15 @@ Evidence:
   (SHOW_STATS=1), and pauses awdl0 while streaming (AWDL_OFF=1, asks for sudo), restored afterwards.
 - Unverified: whether Moonlight on the Mac accepts --absolute-mouse/--performance-overlay, and the AWDL effect on the spikes.
 - Mac app (Omarchy Remote.app) added 2026-10-14 10:40: built from /mac/setup and dry-run here. Not yet run on the Mac.
+
+## App test 2 (10:49-10:52): "can't use mouse on main screen, mouse doesn't work on Mac"
+- Mac input arrived (hyprctl cursorpos moved inside OS-VIRTUAL, x 6316 -> 6704). The host cursor was hidden by the
+  hook, and Moonlight (--absolute-mouse) showed no local cursor either, so there was no cursor anywhere. At the desk,
+  the hidden cursor sat on the invisible virtual screen.
+- The virtual screen showed an empty workspace (4); all windows stay on the physical monitors.
+Fixes: hide_host_cursor default false, Moonlight --no-absolute-mouse (capture: exactly one, the host's cursor),
+stream-only keys via hl.bind/eval (Ctrl+Alt+1..5 = focus workspace N on the current monitor, Ctrl+Alt+Q = disconnect),
+virtual opens on workspace 1, and the app self-updates omarchy-connect from GET /mac/omarchy-connect.
+Verified live: the 6 binds appear/disappear in `hyprctl binds`. `hl.dispatch(hl.dsp.focus({workspace, on_current_monitor=true}))`
+brought ws 9 to the focused monitor. Not verified: /api/apps/close ending a live session.
+Lock after disconnect: LockedHint stays "no" even though omarchy-system-lock ran? Unknown, so ask the user whether the desk was locked.

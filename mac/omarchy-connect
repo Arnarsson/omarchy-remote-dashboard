@@ -116,10 +116,12 @@ pair_once() {
 
 need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the setup one-liner from 'omarchy-stream mac')"; exit 1; }; }
 
-# --absolute-mouse: the Mac's own cursor, zero lag. The host hides its cursor while streaming,
-# so only one shows. For games, toggle capture mode in Moonlight with Ctrl+Alt+Shift+M.
-mouse=(--absolute-mouse)
+# Capture mode: Moonlight hides the Mac cursor and you drive the host's, so exactly one cursor shows.
+# Release the mouse: Ctrl+Option+Shift+Z. MOUSE=absolute in client.env for the Mac's own cursor instead.
+if [[ ${MOUSE:-capture} == absolute ]]; then mouse=(--absolute-mouse); else mouse=(--no-absolute-mouse); fi
 [[ ${SHOW_STATS:-1} == 1 ]] && mouse+=(--performance-overlay)
+KEYS_HINT="Ctrl+Option+1-5: bring workspace here · Ctrl+Option+Q: disconnect"
+
 common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen "${mouse[@]}")
 
 case "${1:-all}" in
@@ -128,6 +130,7 @@ case "${1:-all}" in
     measure
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
     wifi_quiet
+    notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
     wifi_restore ;;
   virtual)
@@ -142,6 +145,7 @@ case "${1:-all}" in
     sleep 2
     pair_once "$VIRTUAL_PORT" || true
     wifi_quiet
+    notify "$KEYS_HINT"; echo "$KEYS_HINT"
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
     wifi_restore
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true

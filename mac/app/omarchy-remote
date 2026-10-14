@@ -7,6 +7,19 @@ HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
 APPLOG="$HOME/Library/Logs/omarchy-remote.log"
 mkdir -p "$(dirname "$APPLOG")"
 
+# Self-update: take the newest client from the host (fixes land without rerunning setup).
+conf="$HOME/.config/omarchy-stream/client.env"
+if [[ -f $conf ]]; then
+  # shellcheck disable=SC1090
+  source "$conf"
+  new=$(mktemp)
+  if curl -fsS -m 3 -H "Authorization: Bearer ${TOKEN:-}" "http://$HOST:$DASHBOARD_PORT/mac/omarchy-connect" -o "$new" 2>/dev/null \
+     && head -1 "$new" | grep -q '^#!/usr/bin/env bash' && bash -n "$new" && ! cmp -s "$new" "$HERE/omarchy-connect"; then
+    cp "$new" "$HERE/omarchy-connect" && chmod +x "$HERE/omarchy-connect"
+  fi
+  rm -f "$new"
+fi
+
 V="Screen sized to this Mac"; M="Main monitor (ultrawide)"; A="All three monitors"; C="Check connection"
 choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
 case "$choice" in
