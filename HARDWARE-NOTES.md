@@ -100,3 +100,30 @@ TOKEN=<host: cat ~/.config/omarchy-stream/token>
 - POST /api/multi/up: three instances active, apollo stopped. CRTC per instance: DP-3=584, HDMI-A-2=392, DP-1=200, all correct.
   POST /api/multi/down: instances stopped, apollo active again, doctor rc=0.
 - Still unverified: Moonlight `pair --pin` on the Mac, the hooks during a real stream, and image quality.
+
+## First real stream from the Mac (virtual, 2026-10-14 10:17-10:19). User: "very bad, slow, two mice"
+Evidence:
+- Hooks DO fire on this Sunshine: "Executing Do Cmd ... hook connect" and "Executing Undo Cmd ... hook disconnect".
+- Mac was on the home LAN, direct (192.168.50.12:41641). Client asked 60000 kbps, Sunshine used 46988 kbps, HEVC, about 60 fps (7252 frames in about 2 min).
+- 41 IDX_REQUEST_IDR_FRAME from the client, i.e. constant packet loss.
+- Host to router: avg 2.6 ms (wired eno2, fine). Host to Mac: 3 ms to 133 ms in bursts (avg 43, mdev 46). Typical macOS
+  Wi-Fi AWDL / power-save spikes. omarchy-connect only used the median RTT, so it chose the full bitrate.
+- Instances inherit min_log_level=verbose from the main conf: a 10 MB log in 2 min, every mouse packet logged.
+- Two cursors: the client sends ABSOLUTE mouse packets, so Moonlight shows the Mac cursor AND the host cursor is
+  composited into the wlr capture (lagging behind on the lossy link).
+- Lock did NOT happen: hypridle/hyprlock aren't installed. Omarchy now locks with `omarchy-system-lock`
+  (omarchy-shell lock), so `loginctl lock-session` has no listener (rc 0, LockedHint=no).
+- Latent bug: the VRR hook uses `hyprctl keyword`, which is rejected on Hyprland 0.56 (Lua). VRR was already 0 here.
+- `hyprctl eval 'hl.config({ cursor = { invisible = true } })'` works (getoption cursor:invisible -> bool true), and reverting works.
+- wlr capture of OS-VIRTUAL used zwp_linux_dmabuf + CUDA external memory (GPU path) and held 60 fps.
+  Capture wasn't the bottleneck; the Mac's Wi-Fi was.
+
+## Fixes after the first stream (106 tests)
+- Hooks set Hyprland options with keyword, falling back to eval (VRR now works on 0.56).
+- New: hide_host_cursor_while_streaming (default on). connect sets cursor:invisible=true, disconnect restores it.
+  Verified live: getoption gives bool true after connect.
+- Lock: omarchy-system-lock first, then `loginctl lock-session <Display session>`. Not triggered live (it would lock the desk).
+- Instances force min_log_level=info.
+- Mac: bitrate also drops for latency spikes (p90 - median), --absolute-mouse (Mac cursor), --performance-overlay
+  (SHOW_STATS=1), and pauses awdl0 while streaming (AWDL_OFF=1, asks for sudo), restored afterwards.
+- Unverified: whether Moonlight on the Mac accepts --absolute-mouse/--performance-overlay, and the AWDL effect on the spikes.

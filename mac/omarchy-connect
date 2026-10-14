@@ -47,14 +47,17 @@ measure() {
     echo "✘ $HOST unreachable over Tailscale. Is the host up and logged in?"; exit 1
   fi
   median=$(awk '{a[NR]=$1} END {print int(a[int((NR+1)/2)])}' <<<"$rtts")
+  # Spikes matter more than the median: Wi-Fi bursts of 100 ms cause packet loss and keyframe storms.
+  local p90; p90=$(awk '{a[NR]=$1} END {i=int(NR*0.9+0.5); if(i<1)i=1; print int(a[i])}' <<<"$rtts")
+  local spike=$(( p90 - median ))
   local loss=$(( (10 - n_ok) * 10 ))
   if   [[ $relayed == yes ]]; then factor=25
-  elif (( median > 60 || loss > 10 )); then factor=40
-  elif (( median > 25 || loss > 0 )); then factor=70
+  elif (( median > 60 || loss > 10 || spike > 40 )); then factor=40
+  elif (( median > 25 || loss > 0 || spike > 15 )); then factor=70
   fi
   BITRATE=$(( MAX_BITRATE_KBPS * factor / 100 ))
-  printf 'path: %s  rtt %sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
-    "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$loss" $(( BITRATE / 1000 )) "$factor"
+  printf 'path: %s  rtt %sms  spikes +%sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
+    "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$spike" "$loss" $(( BITRATE / 1000 )) "$factor"
   if [[ $relayed == yes ]]; then
     echo "  ⚠ relayed: enable UPnP on the host's router or forward UDP 41641 to the host for full quality"
   fi
@@ -64,6 +67,17 @@ measure() {
 mac_resolution() {
   system_profiler SPDisplaysDataType 2>/dev/null \
     | awk '/Resolution:/ {gsub(/ /,""); split($0,a,":"); split(a[2],r,/[^0-9x]/); print r[1]; exit}'
+}
+
+# macOS AWDL (AirDrop/Handoff) pulls the Wi-Fi radio off-channel every second or so: 100 ms spikes.
+wifi_quiet() {
+  [[ ${AWDL_OFF:-1} == 1 ]] || return 0
+  ifconfig awdl0 2>/dev/null | grep -q '<UP' || return 0
+  echo "Pausing AirDrop (awdl0) while streaming to stop Wi-Fi lag spikes (may ask for your Mac password)"
+  sudo ifconfig awdl0 down && AWDL_PAUSED=1 || true
+}
+wifi_restore() {
+  [[ -n ${AWDL_PAUSED:-} ]] && sudo ifconfig awdl0 up && echo "AirDrop back on." || true
 }
 
 api() {  # POST to the host dashboard
@@ -93,14 +107,20 @@ pair_once() {
 
 need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the setup one-liner from 'omarchy-stream mac')"; exit 1; }; }
 
-common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen)
+# --absolute-mouse: the Mac's own cursor, zero lag. The host hides its cursor while streaming,
+# so only one shows. For games, toggle capture mode in Moonlight with Ctrl+Alt+Shift+M.
+mouse=(--absolute-mouse)
+[[ ${SHOW_STATS:-1} == 1 ]] && mouse+=(--performance-overlay)
+common=(--fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode fullscreen "${mouse[@]}")
 
 case "${1:-all}" in
   check) measure ;;
   all)
     measure
     [[ -n ${TOKEN:-} ]] && api /api/multi/down >/dev/null 2>&1 || true   # make sure the main stream is the one running
-    exec "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" ;;
+    wifi_quiet
+    "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" || true
+    wifi_restore ;;
   virtual)
     need_token
     measure
@@ -112,7 +132,9 @@ case "${1:-all}" in
       || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
     sleep 2
     pair_once "$VIRTUAL_PORT" || true
+    wifi_quiet
     "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" || true
+    wifi_restore
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true
     echo "Virtual display removed." ;;
   multi)
@@ -127,7 +149,7 @@ case "${1:-all}" in
     for port in $MULTI_PORTS; do
       res=${sizes[$i]:-${sizes[0]}}; i=$((i+1))
       open -n -a Moonlight --args stream "$HOST:$port" Desktop --resolution "$res" \
-        --bitrate "$per" --fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode windowed
+        --bitrate "$per" --fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode windowed "${mouse[@]}"
       sleep "${LAUNCH_DELAY:-1}"
     done
     echo "Drag each Moonlight window to its Mac display." ;;

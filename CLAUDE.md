@@ -30,7 +30,7 @@ smooth mouse, stable connection from the office. The user tried v1
 - Plug and play: `omarchy-stream mac` prints a one-liner; `GET /mac/setup` serves a Mac installer with
   client.env filled in; `POST /api/pair/<port>/<pin>` and `/api/multi/up|down`; `install.sh -y`.
   Moonlight's `pair --pin` CLI is unverified on the Mac (a fallback reads the PIN from its output).
-- `tests/run.sh`: 94 stubbed checks. Run after every change.
+- `tests/run.sh`: 106 stubbed checks. Run after every change.
 
 ## Verified on hardware (2026-10-14, before any stream)
 install.sh (unit/binary/port detection, idempotent reruns, one backup), doctor all green,

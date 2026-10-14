@@ -19,14 +19,17 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 [ "$2" = is-active ] && { [ "$3" = "${ACTIVE_UNIT:-}" ] && echo active || echo inactive; }
 [ "$2" = show ] && echo "${MAINPID:-0}"; exit 0'
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
-stub loginctl  'echo "loginctl $*" >> "$LOG"'
+stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
+stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
+stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING> mtu 1500"; exit 0'
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
 stub ip        'echo "[{\"dst\":\"default\",\"dev\":\"enp5s0\",\"metric\":100},{\"dst\":\"default\",\"dev\":\"wlan0\",\"metric\":100}]"'
 stub tailscale 'if [ "$1" = ping ]; then
   i=0; while [ $i -lt ${PINGS:-10} ]; do
     if [ -n "$RELAY" ]; then echo "pong from omarchy (100.73.206.17) via DERP(fra) in ${RTT:-48}ms"
-    else echo "pong from omarchy (100.73.206.17) via 85.1.2.3:41641 in ${RTT:-9}ms"; fi; i=$((i+1)); done
+    else r=${RTT:-9}; [ -n "$SPIKE" ] && [ $((i % 3)) = 2 ] && r=$SPIKE
+      echo "pong from omarchy (100.73.206.17) via 85.1.2.3:41641 in ${r}ms"; fi; i=$((i+1)); done
   exit 0; fi
 echo "{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.73.206.17\"]},\"Peer\":{\"a\":{\"HostName\":\"svens-macbook\",\"OS\":\"macOS\",\"Online\":true,\"Active\":true,\"TailscaleIPs\":[\"100.64.0.2\"],\"CurAddr\":\"\",\"Relay\":\"fra\"},\"b\":{\"HostName\":\"idle-box\",\"OS\":\"linux\",\"Online\":true,\"Active\":false,\"TailscaleIPs\":[\"100.64.0.3\"],\"CurAddr\":\"\",\"Relay\":\"ams\"}}}"'
 stub hyprctl '
@@ -36,11 +39,17 @@ case "$1" in
             vm=$(cat "$STATE/vmode" 2>/dev/null || echo 3024x1964)
             [ -f "$STATE/virtual" ] && printf ",{\"name\":\"OS-VIRTUAL\",\"width\":${vm%%x*},\"height\":${vm##*x},\"refreshRate\":60.0,\"x\":5760,\"y\":0,\"scale\":2}"
             echo "]" ;;
-  getoption) echo "{\"option\":\"misc:vrr\",\"int\":$(cat "$STATE/vrr" 2>/dev/null || echo 2)}" ;;
+  getoption) if [ "$2" = cursor:invisible ]; then echo "{\"option\":\"cursor:invisible\",\"bool\":$(cat "$STATE/cursor" 2>/dev/null || echo false)}"
+             else echo "{\"option\":\"misc:vrr\",\"int\":$(cat "$STATE/vrr" 2>/dev/null || echo 2)}"; fi ;;
   keyword) if [ -n "$LUA" ]; then echo "keyword can'"'"'t work with non-legacy parsers. Use eval."; exit 0; fi
            [ "$2" = misc:vrr ] && echo "$3" > "$STATE/vrr"
+           [ "$2" = cursor:invisible ] && echo "$3" > "$STATE/cursor"
            [ "$2" = monitor ] && echo "$3" | cut -d, -f2 | cut -d@ -f1 > "$STATE/vmode"; echo ok ;;
-  eval) echo "$2" | sed -n "s/.*mode = \"\([0-9]*x[0-9]*\)@.*/\1/p" > "$STATE/vmode"; echo ok ;;
+  eval) case "$2" in
+          *"mode ="*) echo "$2" | sed -n "s/.*mode = \"\([0-9]*x[0-9]*\)@.*/\1/p" > "$STATE/vmode" ;;
+          *"invisible ="*) echo "$2" | sed -n "s/.*invisible = \([a-z]*\).*/\1/p" > "$STATE/cursor" ;;
+          *"vrr ="*) echo "$2" | sed -n "s/.*vrr = \([0-9]*\).*/\1/p" > "$STATE/vrr" ;;
+        esac; echo ok ;;
   output) [ "$2" = create ] && touch "$STATE/virtual"; [ "$2" = remove ] && rm -f "$STATE/virtual"; echo ok ;;
 esac'
 stub moonlight 'echo "MOONLIGHT $*" >> "$LOG"'
@@ -97,10 +106,22 @@ echo 2 > "$STATE/vrr"; : > "$LOG"
 check "connect turns VRR off"             '[ "$(cat "$STATE/vrr")" = 0 ]'
 "$CLI" hook disconnect
 check "disconnect restores VRR"           '[ "$(cat "$STATE/vrr")" = 2 ]'
-check "disconnect locks the session"      'grep -q "loginctl lock-session" "$LOG"'
+check "disconnect locks via Omarchy"      'grep -q "OMARCHY-LOCK" "$LOG"'
+: > "$LOG"; "$CLI" hook connect; LOCK_FAIL=1 "$CLI" hook disconnect
+check "lock falls back to logind session" 'grep -q "loginctl lock-session 2$" "$LOG"'
+echo false > "$STATE/cursor"; "$CLI" hook connect
+check "connect hides the host cursor"     '[ "$(cat "$STATE/cursor")" = true ]'
+"$CLI" hook disconnect
+check "disconnect shows the cursor again" '[ "$(cat "$STATE/cursor")" = false ]'
+echo true > "$STATE/cursor"; "$CLI" hook connect; "$CLI" hook disconnect
+check "cursor hidden by user stays hidden" '[ "$(cat "$STATE/cursor")" = true ]'; echo false > "$STATE/cursor"
+echo 2 > "$STATE/vrr"; LUA=1 "$CLI" hook connect
+check "Lua Hyprland: VRR off via eval"    '[ "$(cat "$STATE/vrr")" = 0 ]'
+LUA=1 "$CLI" hook disconnect
+check "Lua Hyprland: VRR restored"        '[ "$(cat "$STATE/vrr")" = 2 ]'
 echo '{"lock_on_disconnect": false}' > "$HOME/.config/omarchy-stream/config.json"; : > "$LOG"
 "$CLI" hook connect; "$CLI" hook disconnect
-check "lock can be turned off"            '! grep -q lock-session "$LOG"'
+check "lock can be turned off"            '! grep -qE "lock-session|OMARCHY-LOCK" "$LOG"'
 echo 0 > "$STATE/vrr"; "$CLI" hook connect; "$CLI" hook disconnect
 check "VRR already off stays off"         '[ "$(cat "$STATE/vrr")" = 0 ]'
 mkdir -p "$WORK/run/hypr/sig123"; touch "$WORK/run/hypr/sig123/.socket.sock"
@@ -119,10 +140,12 @@ echo 823 > "$D/card1-DP-1/connector_id"; echo 837 > "$D/card1-DP-2/connector_id"
 DRM_SYSFS=$D "$CLI" multi setup >/dev/null
 check "output_name follows connector ids" 'grep -q "output_name = 0" "$I/DP-1/sunshine.conf" && grep -q "output_name = 1" "$I/HDMI-A-2/sunshine.conf" && grep -q "output_name = 2" "$I/DP-2/sunshine.conf"'
 check "ports still left-to-right"         'grep -q "port = 48089" "$I/HDMI-A-2/sunshine.conf" && grep -q "port = 48289" "$I/DP-1/sunshine.conf"'
+check "instances log at info, not verbose" 'grep -q "min_log_level = info" "$I/DP-2/sunshine.conf"'
 check "no fps floor in instances"         '! grep -rq minimum_fps_target "$I"'
 : > "$LOG"; out=$("$CLI" virtual 3024x1964@60,2)
 check "virtual creates headless output"   'grep -q "hyprctl output create headless OS-VIRTUAL" "$LOG"'
 check "virtual sets mode and scale"       'grep -q "OS-VIRTUAL,3024x1964@60,auto,2" "$LOG"'
+check "virtual instance logs at info"     'grep -q "min_log_level = info" "$I/virtual/sunshine.conf"'
 check "virtual uses wlr capture"          'grep -q "capture = wlr" "$I/virtual/sunshine.conf" && grep -q "output_name = OS-VIRTUAL" "$I/virtual/sunshine.conf"'
 check "virtual starts its instance"       'grep -q "restart sunshine@virtual" "$LOG"'
 check "virtual instance gets web login"   '[ "$(stat -c %a "$I/virtual/webcreds")" = 600 ] && grep -q "sunshine $I/virtual/sunshine.conf --creds omarchy" "$LOG"'
@@ -250,6 +273,10 @@ check "10% loss: 70%"                     '[ "$(bitrate RTT=9 PINGS=9)" = 42000 
 check "20% loss: 40%"                     '[ "$(bitrate RTT=9 PINGS=8)" = 24000 ]'
 check "very slow/lossy: 40%"              '[ "$(bitrate RTT=90)" = 24000 ]'
 check "relayed: 25%"                      '[ "$(bitrate RELAY=1)" = 15000 ]'
+check "Wi-Fi spikes: 40%"                 '[ "$(bitrate RTT=4 SPIKE=130)" = 24000 ]'
+check "small spikes: 70%"                 '[ "$(bitrate RTT=4 SPIKE=25)" = 42000 ]'
+check "Mac cursor mode + stats overlay"   'grep -q -- "--absolute-mouse --performance-overlay" "$LOG"'
+check "AirDrop paused and restored"       'grep -q "sudo ifconfig awdl0 down" "$LOG" && grep -q "sudo ifconfig awdl0 up" "$LOG"'
 check "unreachable host fails clearly"    '! PINGS=0 "$MC" all >/dev/null'
 check "all-monitors native resolution"    'grep -q -- "--resolution 5760x1080" "$LOG"'
 check "virtual needs a token"             '! "$MC" virtual >/dev/null'

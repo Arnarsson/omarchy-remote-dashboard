@@ -42,6 +42,7 @@ SESSION_FILE = STATE_DIR / "session.json"
 DEFAULT_CONFIG = {
     "disable_vrr_while_streaming": True,   # VRR makes captured frame timing uneven
     "lock_on_disconnect": True,            # don't leave the desktop open at home
+    "hide_host_cursor_while_streaming": True,  # Moonlight shows the Mac's own cursor; a second, lagging one is noise
     "sunshine_unit": "sunshine",           # user unit of the main (all-monitors) Sunshine; install.sh detects it
     "sunshine_bin": "",                    # Sunshine binary that unit runs; empty = first on PATH
     "dashboard_port": 8080,
@@ -341,6 +342,7 @@ def cmd_multi(args):
                 {"port", "output_name", "sunshine_name", "minimum_fps_target", "file_state", "credentials_file",
                  "log_path", "file_apps", "pkey", "cert"}}
         keep.setdefault("capture", "kms")
+        keep["min_log_level"] = "info"  # verbose logs every input packet
         host = os.uname().nodename
         kms = kms_indexes([m["name"] for m in mons])
         for i, m in enumerate(mons):
@@ -481,9 +483,30 @@ def hypr_option(name):
     if code != 0:
         return None
     try:
-        return json.loads(out).get("int")
+        d = json.loads(out)
     except json.JSONDecodeError:
         return None
+    return d["bool"] if "bool" in d else d.get("int")
+
+
+def set_hypr_option(name, value):
+    """`keyword` on legacy configs; `eval` on Lua configs (Hyprland 0.5x+), which reject `keyword`."""
+    text = str(value).lower() if isinstance(value, bool) else str(value)
+    out, code = run(["hyprctl", "keyword", name, text])
+    if code != 0 or "eval" in out:
+        section, key = name.split(":", 1)
+        run(["hyprctl", "eval", f"hl.config({{ {section} = {{ {key} = {text} }} }})"])
+
+
+def lock_session():
+    """Omarchy locks via omarchy-system-lock (omarchy-shell); hypridle may not be running to
+    act on logind's Lock signal. From a service, name the graphical session explicitly."""
+    if shutil.which("omarchy-system-lock"):
+        _, code = run(["omarchy-system-lock"], timeout=15)
+        if code == 0:
+            return
+    sid, _ = run(["loginctl", "show-user", str(os.getuid()), "-p", "Display", "--value"])
+    run(["loginctl", "lock-session"] + ([sid] if sid else []))
 
 
 def cmd_hook(args):
@@ -499,7 +522,10 @@ def cmd_hook(args):
             vrr = hypr_option("misc:vrr")
             if vrr:
                 state["vrr"] = vrr
-                run(["hyprctl", "keyword", "misc:vrr", "0"])
+                set_hypr_option("misc:vrr", 0)
+        if cfg["hide_host_cursor_while_streaming"] and hypr_option("cursor:invisible") is False:
+            state["cursor_hidden"] = True
+            set_hypr_option("cursor:invisible", True)
         SESSION_FILE.write_text(json.dumps(state))
         return 0
     try:
@@ -507,10 +533,12 @@ def cmd_hook(args):
     except (OSError, json.JSONDecodeError):
         state = {}
     if state.get("vrr"):
-        run(["hyprctl", "keyword", "misc:vrr", str(state["vrr"])])
+        set_hypr_option("misc:vrr", state["vrr"])
+    if state.get("cursor_hidden"):
+        set_hypr_option("cursor:invisible", False)
     SESSION_FILE.unlink(missing_ok=True)
     if cfg["lock_on_disconnect"]:
-        run(["loginctl", "lock-session"])
+        lock_session()
     return 0
 
 
@@ -562,6 +590,7 @@ def cmd_virtual(args):
         # KMS only sees physical connectors; a headless output needs wlroots capture.
         "capture": "wlr",
         "output_name": VIRTUAL_NAME,
+        "min_log_level": "info",  # verbose logs every input packet
         "file_state": str(d / "sunshine_state.json"),
         "credentials_file": str(d / "sunshine_state.json"),
         "file_apps": str(d / "apps.json"),
@@ -657,6 +686,8 @@ def mac_client_env(token, dash_port):
         "FPS": 60,
         "MAX_BITRATE_KBPS": 60000,
         "CODEC": "HEVC",
+        "SHOW_STATS": 1,   # Moonlight stats overlay (Ctrl+Alt+Shift+S toggles)
+        "AWDL_OFF": 1,     # pause AirDrop while streaming (Wi-Fi lag spikes)
         "MULTI_PORTS": '"' + " ".join(map(str, ports)) + '"',
         "VIRTUAL_PORT": VIRTUAL_PORT,
         "TOKEN": token,
