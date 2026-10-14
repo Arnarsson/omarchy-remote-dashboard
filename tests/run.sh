@@ -5,6 +5,7 @@
 set -uo pipefail
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=$(mktemp -d)
+trap 'jobs -p | xargs -r kill 2>/dev/null; rm -rf "$WORK"' EXIT
 STUBS=$WORK/stubs; mkdir -p "$STUBS"
 export LOG=$WORK/calls.log STATE=$WORK/state; mkdir -p "$STATE"; : > "$LOG"
 PASS=0; FAIL=0
@@ -21,6 +22,7 @@ stub systemctl 'echo "systemctl $*" >> "$LOG"
 stub ss        'case "$*" in *":${BUSY:-none} "*|*":${BUSY:-none}") echo "LISTEN 0 4096 127.0.0.1:$BUSY";; esac; exit 0'
 stub loginctl  'echo "loginctl $*" >> "$LOG"; [ "$1" = show-user ] && echo 2; exit 0'
 stub omarchy-system-lock 'echo "OMARCHY-LOCK" >> "$LOG"; [ -z "$LOCK_FAIL" ]'
+stub osascript 'case "$*" in *"choose from list"*) echo "${CHOICE:-false}" ;; *) echo "OSA $*" >> "$LOG" ;; esac'
 stub ifconfig  '[ "$1" = awdl0 ] && echo "awdl0: flags=8943<UP,BROADCAST,RUNNING> mtu 1500"; exit 0'
 stub sudo      'echo "sudo $*" >> "$LOG"; [ "$1" = setcap ] && touch "$STATE/capped"; exit 0'
 stub getcap    '[ -f "$STATE/capped" ] && echo "$1 cap_sys_admin=p"; exit 0'
@@ -188,6 +190,9 @@ curl -s "${A[@]}" localhost:$PORT/mac/setup > "$WORK/macsetup.sh"
 HOME=$MH PATH=$STUBS:/usr/bin:/bin bash "$WORK/macsetup.sh" > "$WORK/macsetup.out" 2>&1
 ME=$MH/.config/omarchy-stream/client.env
 check "mac setup installs the client"     'cmp -s "$MH/.local/bin/omarchy-connect" "$ROOT/mac/omarchy-connect" && [ -x "$MH/.local/bin/omarchy-connect" ]'
+APPB="$MH/Applications/Omarchy Remote.app"
+check "mac setup builds the app"          '[ -x "$APPB/Contents/MacOS/omarchy-remote" ] && cmp -s "$APPB/Contents/Resources/omarchy-connect" "$ROOT/mac/omarchy-connect" && python3 -c "import plistlib,sys; d=plistlib.load(open(sys.argv[1],\"rb\")); assert d[\"CFBundleExecutable\"]==\"omarchy-remote\"" "$APPB/Contents/Info.plist"'
+check "mac setup adds AirDrop sudo rule"  'grep -q "sudo visudo -cf" "$LOG" && grep -q "sudo install -m 440 -o root -g wheel .* /etc/sudoers.d/omarchy-awdl" "$LOG"'
 check "mac setup fills client.env"        'grep -q "^HOST=100.73.206.17$" "$ME" && grep -q "^TOKEN=$TOK$" "$ME" && grep -q "^DASHBOARD_PORT=$PORT$" "$ME" && grep -q "^MULTI_PORTS=\"48089 48189 48289\"$" "$ME" && [ "$(stat -c %a "$ME")" = 600 ]'
 check "mac setup env is sourceable"       'bash -c "set -u; source \"$ME\"; [ \"\$MONITOR_RES\" = \"1920x1080 1920x1080 1920x1080\" ]"'
 check "omarchy-stream mac prints it"      '"$CLI" mac | grep -q "curl -fsSL -H \"Authorization: Bearer $TOK\" http://100.73.206.17:.*/mac/setup | bash"'
@@ -276,7 +281,7 @@ check "relayed: 25%"                      '[ "$(bitrate RELAY=1)" = 15000 ]'
 check "Wi-Fi spikes: 40%"                 '[ "$(bitrate RTT=4 SPIKE=130)" = 24000 ]'
 check "small spikes: 70%"                 '[ "$(bitrate RTT=4 SPIKE=25)" = 42000 ]'
 check "Mac cursor mode + stats overlay"   'grep -q -- "--absolute-mouse --performance-overlay" "$LOG"'
-check "AirDrop paused and restored"       'grep -q "sudo ifconfig awdl0 down" "$LOG" && grep -q "sudo ifconfig awdl0 up" "$LOG"'
+check "AirDrop paused and restored"       'grep -q "sudo -n /sbin/ifconfig awdl0 down" "$LOG" && grep -q "sudo -n /sbin/ifconfig awdl0 up" "$LOG"'
 check "unreachable host fails clearly"    '! PINGS=0 "$MC" all >/dev/null'
 check "all-monitors native resolution"    'grep -q -- "--resolution 5760x1080" "$LOG"'
 check "virtual needs a token"             '! "$MC" virtual >/dev/null'
@@ -297,6 +302,17 @@ check "already paired: no pairing again"  '! grep -q "api/pair" "$LOG"'
 rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; "$MC" multi >/dev/null
 check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'
+section "Mac app (Omarchy Remote.app)"
+L2="$APPB/Contents/MacOS/omarchy-remote"
+: > "$LOG"; HOME=$MH CHOICE="Screen sized to this Mac" "$L2"
+check "app: virtual choice streams"       'grep -q "api/virtual/3024x1964@60,2" "$LOG" && grep -q "MOONLIGHT stream 100.73.206.17:48989" "$LOG"'
+check "app: notifications, no terminal"   'grep -q "OSA -e display notification" "$LOG" && grep -q "=== .* virtual" "$MH/Library/Logs/omarchy-remote.log"'
+: > "$LOG"; HOME=$MH CHOICE="Main monitor (ultrawide)" "$L2"
+check "app: main monitor choice"          'grep -q "MOONLIGHT stream 100.73.206.17 Desktop --resolution" "$LOG"'
+: > "$LOG"; HOME=$MH CHOICE=false "$L2"
+check "app: cancel does nothing"          '! grep -q MOONLIGHT "$LOG"'
+: > "$LOG"; HOME=$MH CHOICE="Check connection" PINGS=0 "$L2"
+check "app: errors shown as a dialog"     'grep -q "OSA -e display dialog .*unreachable" "$LOG"'
 check "usage on bad argument"             '! "$MC" nope >/dev/null'
 
 printf '\n%d passed, %d failed\n' $PASS $FAIL

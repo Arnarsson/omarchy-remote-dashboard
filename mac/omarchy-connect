@@ -44,7 +44,7 @@ measure() {
   grep -q 'via DERP' <<<"$out" && relayed=yes
   rtts=$(grep -o 'in [0-9.]*ms' <<<"$out" | grep -o '[0-9.]*' | sort -n || true)
   if [[ $n_ok -eq 0 ]]; then
-    echo "✘ $HOST unreachable over Tailscale. Is the host up and logged in?"; exit 1
+    echo "✘ $HOST unreachable over Tailscale. Is Tailscale on, and is the Omarchy PC awake?"; exit 1
   fi
   median=$(awk '{a[NR]=$1} END {print int(a[int((NR+1)/2)])}' <<<"$rtts")
   # Spikes matter more than the median: Wi-Fi bursts of 100 ms cause packet loss and keyframe storms.
@@ -58,6 +58,7 @@ measure() {
   BITRATE=$(( MAX_BITRATE_KBPS * factor / 100 ))
   printf 'path: %s  rtt %sms  spikes +%sms  loss %s%%  ->  %s Mbps (%s%% of max)\n' \
     "$([[ $relayed == yes ]] && echo 'RELAYED (DERP)' || echo direct)" "$median" "$spike" "$loss" $(( BITRATE / 1000 )) "$factor"
+  notify "$([[ $relayed == yes ]] && echo 'Relayed connection' || echo 'Direct connection'), $(( BITRATE / 1000 )) Mbps"
   if [[ $relayed == yes ]]; then
     echo "  ⚠ relayed: enable UPnP on the host's router or forward UDP 41641 to the host for full quality"
   fi
@@ -69,15 +70,23 @@ mac_resolution() {
     | awk '/Resolution:/ {gsub(/ /,""); split($0,a,":"); split(a[2],r,/[^0-9x]/); print r[1]; exit}'
 }
 
+# Notification when run from Omarchy Remote.app (no terminal to print to).
+notify() {
+  [[ -n ${OMARCHY_GUI:-} ]] || return 0
+  osascript -e "display notification \"${1//\"/}\" with title \"Omarchy Remote\"" >/dev/null 2>&1 || true
+}
+
 # macOS AWDL (AirDrop/Handoff) pulls the Wi-Fi radio off-channel every second or so: 100 ms spikes.
+# Setup installs a sudoers rule for exactly these two commands, so this never prompts.
 wifi_quiet() {
   [[ ${AWDL_OFF:-1} == 1 ]] || return 0
   ifconfig awdl0 2>/dev/null | grep -q '<UP' || return 0
-  echo "Pausing AirDrop (awdl0) while streaming to stop Wi-Fi lag spikes (may ask for your Mac password)"
-  sudo ifconfig awdl0 down && AWDL_PAUSED=1 || true
+  if sudo -n /sbin/ifconfig awdl0 down 2>/dev/null; then
+    AWDL_PAUSED=1; echo "AirDrop paused while streaming (stops Wi-Fi lag spikes)"
+  fi
 }
 wifi_restore() {
-  [[ -n ${AWDL_PAUSED:-} ]] && sudo ifconfig awdl0 up && echo "AirDrop back on." || true
+  [[ -n ${AWDL_PAUSED:-} ]] && sudo -n /sbin/ifconfig awdl0 up 2>/dev/null && echo "AirDrop back on." || true
 }
 
 api() {  # POST to the host dashboard
@@ -89,7 +98,7 @@ pair_once() {
   local port=$1 mark="$HOME/.config/omarchy-stream/paired.$1" pin mp log
   [[ -f $mark ]] && return 0
   pin=$(printf '%04d' $((RANDOM % 10000)))
-  echo "Pairing with $HOST:$port (first time only) ..."
+  echo "Pairing with $HOST:$port (first time only) ..."; notify "Pairing (first time only)..."
   "$MOONLIGHT" pair "$HOST:$port" --pin "$pin" >/dev/null 2>&1 & mp=$!
   if api "/api/pair/$port/$pin" >/dev/null && wait $mp; then
     touch "$mark"; echo "  paired"; return 0
@@ -126,7 +135,7 @@ case "${1:-all}" in
     measure
     res=$(mac_resolution); [[ -n $res ]] || { echo "Couldn't read this Mac's resolution"; exit 1; }
     scale=1; [[ ${res%x*} -gt 2560 ]] && scale=2
-    echo "Creating ${res}@${FPS} (scale ${scale}) virtual display on $HOST ..."
+    echo "Creating ${res}@${FPS} (scale ${scale}) virtual display on $HOST ..."; notify "Creating a ${res} screen on Omarchy..."
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" \
       "http://$HOST:$DASHBOARD_PORT/api/virtual/${res}@${FPS},${scale}" >/dev/null \
       || { echo "✘ host refused (token? dashboard running?)"; exit 1; }
@@ -152,6 +161,10 @@ case "${1:-all}" in
         --bitrate "$per" --fps "$FPS" --video-codec "$CODEC" --frame-pacing --display-mode windowed "${mouse[@]}"
       sleep "${LAUNCH_DELAY:-1}"
     done
+    if wifi_quiet && [[ -n ${AWDL_PAUSED:-} ]]; then   # windows run on their own; restore when the last one closes
+      ( sleep 10; while pgrep -xq Moonlight; do sleep 3; done; sudo -n /sbin/ifconfig awdl0 up ) >/dev/null 2>&1 &
+    fi
+    notify "Drag each window to its Mac display"
     echo "Drag each Moonlight window to its Mac display." ;;
   *) sed -n 2,9p "$0"; exit 1 ;;
 esac

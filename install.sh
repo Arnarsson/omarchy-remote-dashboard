@@ -54,6 +54,9 @@ mkdir -p "$APP/dashboard" "$APP/mac" "$UNITS" ~/.local/bin
 install -m755 omarchy-stream "$APP/"
 install -m644 dashboard/index.html "$APP/dashboard/"
 install -m755 mac/omarchy-connect "$APP/mac/"
+mkdir -p "$APP/mac/app"
+install -m755 mac/app/omarchy-remote "$APP/mac/app/"
+install -m644 mac/app/Info.plist "$APP/mac/app/"
 ln -sf "$APP/omarchy-stream" "$BIN"
 
 sed "s|@SUNSHINE@|$SUNSHINE|" systemd/sunshine@.service > "$UNITS/sunshine@.service"

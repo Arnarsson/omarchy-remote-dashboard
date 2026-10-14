@@ -64,8 +64,13 @@ into Terminal on the Mac:
 curl -fsSL -H "Authorization: Bearer <token>" http://<tailscale-ip>:<port>/mac/setup | bash
 ```
 
-It installs `omarchy-connect`, writes `client.env` with this host's IP, monitor sizes, ports
-and token, and installs Moonlight via Homebrew if it's missing. Then:
+It installs **Omarchy Remote.app** (in Applications and the Dock), the `omarchy-connect`
+command, `client.env` with this host's IP, monitor sizes, ports and token, Moonlight via
+Homebrew if missing, and a one-time sudoers rule so AirDrop can be paused while streaming
+(AWDL causes 100 ms Wi-Fi spikes). After that, click the app and pick a mode; no Terminal.
+Status shows as notifications, errors as dialogs; log in `~/Library/Logs/omarchy-remote.log`.
+
+From Terminal, the same modes:
 
 ```bash
 omarchy-connect virtual  # a screen sized to this Mac (pixel-perfect, removed on quit)
@@ -83,7 +88,7 @@ isn't possible with KMS. Use `multi` or `virtual` for more than the main monitor
 
 ## Tests
 
-`tests/run.sh` runs 106 checks with stubbed system tools (installer, doctor, hooks,
+`tests/run.sh` runs 113 checks with stubbed system tools (installer, doctor, hooks,
 multi/virtual, dashboard API and auth, Mac script bitrate tiers). Run it after any change.
 
 ## Reading the result

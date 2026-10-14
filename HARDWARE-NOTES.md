@@ -127,3 +127,4 @@ Evidence:
 - Mac: bitrate also drops for latency spikes (p90 - median), --absolute-mouse (Mac cursor), --performance-overlay
   (SHOW_STATS=1), and pauses awdl0 while streaming (AWDL_OFF=1, asks for sudo), restored afterwards.
 - Unverified: whether Moonlight on the Mac accepts --absolute-mouse/--performance-overlay, and the AWDL effect on the spikes.
+- Mac app (Omarchy Remote.app) added 2026-10-14 10:40: built from /mac/setup and dry-run here. Not yet run on the Mac.

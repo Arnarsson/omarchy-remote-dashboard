@@ -1,0 +1,30 @@
+#!/bin/bash
+# Omarchy Remote.app launcher: pick a mode, then run the bundled omarchy-connect.
+# GUI only: dialogs and notifications instead of a terminal. Log: ~/Library/Logs/omarchy-remote.log
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"   # GUI apps start with a minimal PATH
+export OMARCHY_GUI=1
+HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
+APPLOG="$HOME/Library/Logs/omarchy-remote.log"
+mkdir -p "$(dirname "$APPLOG")"
+
+V="Screen sized to this Mac"; M="Main monitor (ultrawide)"; A="All three monitors"; C="Check connection"
+choice=$(osascript -e "choose from list {\"$V\", \"$M\", \"$A\", \"$C\"} with title \"Omarchy Remote\" with prompt \"Connect to Omarchy:\" default items {\"$V\"}" 2>/dev/null)
+case "$choice" in
+  "$V") mode=virtual ;;
+  "$M") mode=all ;;
+  "$A") mode=multi ;;
+  "$C") mode=check ;;
+  *) exit 0 ;;   # cancelled
+esac
+
+echo "=== $(date) $mode" >> "$APPLOG"
+tmp=$(mktemp)
+"$HERE/omarchy-connect" "$mode" > "$tmp" 2>&1; rc=$?
+cat "$tmp" >> "$APPLOG"; out=$(cat "$tmp"); rm -f "$tmp"
+path=$(grep -m1 '^path:' <<<"$out" | sed 's/"/\\"/g')
+if [[ $rc -ne 0 ]]; then
+  msg=$(grep -E '✘|Set TOKEN|refused|unreachable' <<<"$out" | tail -1 | sed 's/"/\\"/g')
+  osascript -e "display dialog \"${msg:-Something went wrong.}\n\nDetails: ~/Library/Logs/omarchy-remote.log\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null
+elif [[ $mode == check ]]; then
+  osascript -e "display dialog \"${path:-No result}\" with title \"Omarchy Remote\" buttons {\"OK\"} default button 1" >/dev/null
+fi
