@@ -1,0 +1,173 @@
+#!/usr/bin/env bash
+# omarchy-connect (Linux): stream the Omarchy PC to this laptop, Parsec-style.
+#
+#   omarchy-connect            a screen on the PC sized to this laptop (recommended)
+#   omarchy-connect monitor    stream the PC's main monitor as it is
+#   omarchy-connect check      measure the path and show the bitrate it would use
+#   omarchy-connect pair       pair this laptop with the PC (asked for automatically when needed)
+#
+# The macOS sibling is mac/omarchy-connect; both talk to the same dashboard API.
+# Settings: ~/.config/omarchy-stream/client.env
+set -euo pipefail
+
+CONF="$HOME/.config/omarchy-stream/client.env"
+if [[ ! -f $CONF ]]; then
+  mkdir -p "$(dirname "$CONF")"
+  cat > "$CONF" <<'CFG'
+HOST=100.83.83.58            # Tailscale address of the Omarchy PC
+DASHBOARD_PORT=8110
+TOKEN=                       # PC: cat ~/.config/omarchy-stream/token
+VIRTUAL_PORT=48989
+MONITOR_PORT=48189           # the PC's main monitor, as its own stream
+FPS=60
+MAX_BITRATE_KBPS=40000
+CODEC=HEVC
+AUDIO=mac                    # mac = play here, host = play on the PC's speakers
+CLIPBOARD=1
+CFG
+  chmod 600 "$CONF"
+  echo "Created $CONF - put the PC's token in it, then run this again."; exit 0
+fi
+# shellcheck disable=SC1090
+source "$CONF"
+[[ -n ${TOKEN:-} ]] || { echo "✘ TOKEN missing in $CONF (PC: cat ~/.config/omarchy-stream/token)"; exit 1; }
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+export HYPRLAND_INSTANCE_SIGNATURE=${HYPRLAND_INSTANCE_SIGNATURE:-$(ls -t "$XDG_RUNTIME_DIR/hypr" 2>/dev/null | head -1)}
+MOONLIGHT=${MOONLIGHT:-$(command -v moonlight)}
+API="http://$HOST:$DASHBOARD_PORT"
+AUTH="Authorization: Bearer $TOKEN"
+
+note() { echo "$*"; command -v notify-send >/dev/null && notify-send -a "Omarchy Remote" "$*" || true; }
+api()  { curl -fsS -m "${2:-60}" -X POST -H "$AUTH" "$API$1"; }
+
+# This laptop's own screen, so the PC's screen can be made to match it exactly.
+screen_size() { hyprctl monitors -j | jq -r '[.[] | select(.focused)][0] // .[0] | "\(.width)x\(.height)"'; }
+
+# Direct or relayed, and how jittery: the PC answers from its own Tailscale status.
+measure() {
+  local relayed=no pings n_ok rtts median p90 spike factor=100 pathf
+  pathf=$(mktemp); curl -fsS -m 2 -H "$AUTH" "$API/api/path" -o "$pathf" 2>/dev/null || true
+  grep -q '"direct": false' "$pathf" 2>/dev/null && relayed=yes
+  rm -f "$pathf"
+  pings=$(ping -c 10 -i 0.1 -W 3 "$HOST" 2>&1 || true)
+  n_ok=$(grep -c 'bytes from' <<<"$pings" || true)
+  (( n_ok > 0 )) || { echo "✘ $HOST is unreachable. Tailscale up? PC awake?"; exit 1; }
+  rtts=$(grep -o 'time=[0-9.]*' <<<"$pings" | cut -d= -f2 | sort -n)
+  median=$(awk '{a[NR]=$1} END {print int(a[int((NR+1)/2)])}' <<<"$rtts")
+  p90=$(awk '{a[NR]=$1} END {i=int(NR*0.9+0.5); if(i<1)i=1; print int(a[i])}' <<<"$rtts")
+  spike=$(( p90 - median )); local loss=$(( (10 - n_ok) * 10 ))
+  if   [[ $relayed == yes ]]; then factor=25
+  elif (( median > 60 || loss > 10 || spike > 40 )); then factor=40
+  elif (( median > 25 || loss > 0 || spike > 15 )); then factor=70
+  fi
+  BITRATE=$(( MAX_BITRATE_KBPS * factor / 100 ))
+  printf 'path: %s  rtt %sms  spikes +%sms  loss %s%%  ->  %s Mbps\n' \
+    "$([[ $relayed == yes ]] && echo RELAYED || echo direct)" "$median" "$spike" "$loss" $(( BITRATE / 1000 ))
+}
+
+# Is this laptop paired with the instance on $1? Asks the PC with Moonlight's own certificate.
+paired_with() {
+  python3 - "$1" <<'PY'
+import glob, os, re, ssl, sys, tempfile, urllib.request
+port = int(sys.argv[1]) - 5   # Sunshine's HTTPS port sits five below its HTTP one
+conf = (glob.glob(os.path.expanduser("~/.config/Moonlight*/Moonlight.conf")) or [None])[0]
+if not conf:
+    sys.exit(1)
+text = open(conf, encoding="utf-8", errors="replace").read()
+def grab(k):
+    m = re.search(rf'^{k}="@ByteArray\((.*?)\)"\s*$', text, re.M | re.S)
+    return m.group(1).replace("\\n", "\n") if m else None
+cert, key = grab("certificate"), grab("key")
+if not (cert and key):
+    sys.exit(1)
+d = tempfile.mkdtemp(); cp, kp = d + "/c.pem", d + "/k.pem"
+open(cp, "w").write(cert); open(kp, "w").write(key)
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+ctx.load_cert_chain(cp, kp)
+host = os.environ.get("HOST", "")
+try:
+    body = urllib.request.urlopen(f"https://{host}:{port}/serverinfo?uniqueid=0123456789ABCDEF",
+                                  timeout=8, context=ctx).read().decode(errors="replace")
+except Exception:
+    sys.exit(1)
+sys.exit(0 if re.search(r"<PairStatus>1</PairStatus>", body) else 1)
+PY
+}
+
+# One-time per instance: Moonlight shows a PIN, the PC accepts it through the dashboard.
+pair_flow() {
+  local port=$1 pin
+  note "This laptop is not paired with the PC yet."
+  cat <<EOS
+
+  1. Open Moonlight (it is already installed)
+  2. Add PC  ->  $HOST:$port
+  3. Click it; Moonlight shows a four-digit PIN
+
+EOS
+  read -rp "  Type the PIN here and press enter: " pin
+  [[ $pin =~ ^[0-9]{4}$ ]] || { echo "✘ that is not a four-digit PIN"; return 1; }
+  if api "/api/pair/$port/$pin" 40 | grep -q '"ok": true'; then
+    note "Paired. You will not have to do this again."
+  else
+    echo "✘ the PC saw no pairing request. Click the PC in Moonlight, then rerun within 20 seconds."
+    return 1
+  fi
+}
+
+# Both directions, reusing the same endpoint the Mac client uses.
+clip_sync() {
+  [[ ${CLIPBOARD:-1} == 1 ]] || return 0
+  set +e +o pipefail
+  local dir last=""; dir=$(mktemp -d)
+  wl-paste --watch sh -c "wl-paste -n > $dir/out 2>/dev/null; echo changed > $dir/flag" &
+  local watcher=$!
+  trap 'kill $watcher 2>/dev/null' TERM INT
+  while :; do
+    if [[ -f $dir/flag ]]; then
+      rm -f "$dir/flag"
+      if [[ -s $dir/out ]] && [[ $(sha1sum < "$dir/out") != "$last" ]]; then
+        curl -fsS -m 15 -X POST -H "$AUTH" -H "Content-Type: text/plain; charset=utf-8" \
+             --data-binary @"$dir/out" "$API/api/clipboard" >/dev/null 2>&1 \
+          && last=$(sha1sum < "$dir/out")
+      fi
+    fi
+    local code
+    code=$(curl -sS -m 10 -o "$dir/in" -w '%{http_code}' -H "$AUTH" \
+           "$API/api/clipboard?have=$(sha1sum < "$dir/in" 2>/dev/null | cut -d' ' -f1)" 2>/dev/null)
+    if [[ $code == 200 && -s $dir/in ]] && [[ $(sha1sum < "$dir/in") != "$last" ]]; then
+      wl-copy < "$dir/in" 2>/dev/null && last=$(sha1sum < "$dir/in")
+    fi
+    sleep 0.6
+  done
+}
+
+case "${1:-virtual}" in
+  check) measure ;;
+  pair)  pair_flow "${2:-$VIRTUAL_PORT}" ;;
+  monitor)
+    measure
+    paired_with "$MONITOR_PORT" || pair_flow "$MONITOR_PORT" || exit 1
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
+    clip_sync & clip=$!
+    note "Ctrl+Alt+1-5: bring a workspace here · Ctrl+Alt+Q: disconnect"
+    "$MOONLIGHT" stream "$HOST:$MONITOR_PORT" Desktop --bitrate "$BITRATE" --fps "$FPS" \
+      --video-codec "$CODEC" --display-mode fullscreen || true
+    kill $clip 2>/dev/null || true ;;
+  virtual)
+    res=$(screen_size); [[ -n $res ]] || { echo "✘ could not read this laptop's screen size"; exit 1; }
+    measure
+    echo "Creating a ${res} screen on the PC ..."
+    api "/api/virtual/${res}@${FPS},1" 90 >/dev/null || { echo "✘ the PC refused to create the screen"; exit 1; }
+    trap 'api /api/virtual/off 30 >/dev/null 2>&1 || true' EXIT
+    paired_with "$VIRTUAL_PORT" || pair_flow "$VIRTUAL_PORT" || exit 1
+    api "/api/audio/${AUDIO:-mac}" >/dev/null 2>&1 || true
+    clip_sync & clip=$!
+    note "Ctrl+Alt+1-5: bring a workspace here · Ctrl+Alt+Q: disconnect"
+    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" \
+      --fps "$FPS" --video-codec "$CODEC" --display-mode fullscreen || true
+    kill $clip 2>/dev/null || true
+    echo "Screen removed from the PC." ;;
+  *) echo "usage: omarchy-connect [virtual|monitor|check|pair]"; exit 2 ;;
+esac

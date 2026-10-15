@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Clicked from the app menu: run omarchy-connect in a terminal window, so its messages
+# and the one-time pairing prompt are visible. Falls back to running headless.
+set -u
+MODE=${1:-virtual}
+SELF=$(command -v omarchy-connect || echo "$HOME/.local/bin/omarchy-connect")
+TERM_CMD=""
+for t in ghostty foot alacritty kitty xterm; do
+  command -v "$t" >/dev/null && { TERM_CMD=$t; break; }
+done
+
+if [[ -z $TERM_CMD ]]; then
+  exec "$SELF" "$MODE"
+fi
+
+# Keep the window open afterwards only when something went wrong, so a clean session
+# just closes when the stream ends.
+inner="\"$SELF\" \"$MODE\"; rc=\$?; [ \$rc -eq 0 ] || { echo; echo \"exit \$rc - press enter to close\"; read -r _; }"
+case $TERM_CMD in
+  ghostty) exec ghostty -e bash -lc "$inner" ;;
+  foot)    exec foot bash -lc "$inner" ;;
+  *)       exec "$TERM_CMD" -e bash -lc "$inner" ;;
+esac

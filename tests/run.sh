@@ -383,7 +383,7 @@ section "Mac client (omarchy-connect)"
 new_home; MC=$ROOT/mac/omarchy-connect
 "$MC" >/dev/null
 check "first run writes private config"   '[ "$(stat -c %a "$HOME/.config/omarchy-stream/client.env")" = 600 ]'
-bitrate() { : > "$LOG"; env "$@" "$MC" all >/dev/null; grep -o -- "--bitrate [0-9]*" "$LOG" | grep -o "[0-9]*$"; }
+bitrate() { : > "$LOG"; env MAX_RETRIES=0 "$@" "$MC" all >/dev/null; grep -o -- "--bitrate [0-9]*" "$LOG" | grep -o "[0-9]*$" | head -1; }
 check "clean direct path: full 60 Mbps"   '[ "$(bitrate RTT=9)" = 60000 ]'
 check "slower path: 70%"                  '[ "$(bitrate RTT=35)" = 42000 ]'
 check "10% loss: 70%"                     '[ "$(bitrate RTT=9 PINGS=9)" = 42000 ]'
@@ -423,6 +423,14 @@ check "Mac reports diagnostics to host"   'grep -q "CURL .*--data-binary @- http
 check "virtual pairs itself once"         'grep -q "api/pair/48989/[0-9]\{4\}" "$LOG" && grep -q "MOONLIGHT pair omarchy:48989 --pin" "$LOG" && [ -f "$HOME/.config/omarchy-stream/paired.48989" ]'
 : > "$LOG"; "$MC" virtual >/dev/null
 check "already paired: no pairing again"  '! grep -q "api/pair" "$LOG"'
+# A stale "paired" marker must not survive the host forgetting this client, and a stream that
+# dies in seconds should come back by itself.
+: > "$LOG"; MOONLIGHT_FAIL_SECONDS=0 ML_HOOK="echo 'has not been paired'" "$MC" virtual >/dev/null 2>&1
+check "pairing error is not retried"      '[ "$(grep -c "MOONLIGHT stream" "$LOG")" = 1 ]'
+: > "$LOG"; out=$(RETRY_IF_SHORTER_THAN=90 MAX_RETRIES=2 "$MC" virtual 2>&1)
+check "a dropped stream reconnects"       '[ "$(grep -c "MOONLIGHT stream" "$LOG")" = 3 ] && grep -q "reconnecting (1/2)" <<<"$out"'
+: > "$LOG"; out=$(RETRY_IF_SHORTER_THAN=0 "$MC" virtual 2>&1)
+check "a real session is left alone"      '[ "$(grep -c "MOONLIGHT stream" "$LOG")" = 1 ] && ! grep -q reconnecting <<<"$out"'
 rm -f "$HOME"/.config/omarchy-stream/paired.48?89; : > "$LOG"; CLIPBOARD=0 "$MC" multi >/dev/null
 check "multi starts host streams"         'grep -q "api/multi/up" "$LOG"'
 check "multi pairs every monitor stream"  '[ "$(grep -c "api/pair/48[0-2]89/" "$LOG")" = 3 ]'

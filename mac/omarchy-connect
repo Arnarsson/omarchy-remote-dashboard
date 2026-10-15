@@ -324,7 +324,13 @@ rescue() {
 # Pair Moonlight with an instance once: Moonlight starts the request, the host submits the PIN.
 pair_once() {
   local port=$1 mark="$HOME/.config/omarchy-stream/paired.$1" pin mp log
-  [[ -f $mark ]] && return 0
+  # The marker only records that we paired once. Moonlight regenerates its identity when its
+  # settings are rebuilt, and the host then rejects it, so ask the host who it trusts today.
+  if [[ -f $mark ]]; then
+    still_paired "$port" && return 0
+    echo "  the host no longer recognises this Mac; pairing again"
+    rm -f "$mark"
+  fi
   pin=$(printf '%04d' $((RANDOM % 10000)))
   echo "Pairing with $HOST:$port (first time only) ..."; notify "Pairing (first time only)..."
   "$MOONLIGHT" pair "$HOST:$port" --pin "$pin" >/dev/null 2>&1 & mp=$!
@@ -340,6 +346,61 @@ pair_once() {
   fi
   kill $mp 2>/dev/null || true; rm -f "$log"
   echo "  ✘ automatic pairing failed: in Moonlight, add $HOST:$port and pair by hand"; return 1
+}
+
+# A Wi-Fi hiccup can drop Moonlight's control stream seconds into a session. As long as the
+# host is still there on the tailnet, that should reconnect by itself rather than dump you back
+# to the desktop. A session you ended yourself lasts longer than the cutoff, so it is left alone.
+RETRY_IF_SHORTER_THAN=${RETRY_IF_SHORTER_THAN:-90}
+MAX_RETRIES=${MAX_RETRIES:-3}
+
+stream_with_retries() {
+  local label=$1 target=$2 log=$3; shift 3
+  local try=0 began ended
+  while :; do
+    began=$(date +%s)
+    "$MOONLIGHT" stream "$target" Desktop "$@" >>"$log" 2>&1 || true
+    ended=$(date +%s)
+    (( try >= MAX_RETRIES )) && break
+    (( ended - began >= RETRY_IF_SHORTER_THAN )) && break        # a real session, now ended
+    grep -q "has not been paired" "$log" && break                 # pairing, not the network
+    ping -c 1 -t 2 "$HOST" >/dev/null 2>&1 || break               # host really is gone
+    try=$((try + 1))
+    echo "connection dropped after $(( ended - began ))s, reconnecting ($try/$MAX_RETRIES) ..."
+    notify "Connection dropped, reconnecting ($try/$MAX_RETRIES)"
+    sleep 2
+  done
+}
+
+# Does the host still accept this Mac's Moonlight certificate on that port? Sunshine answers
+# PairStatus over its HTTPS port, which sits five below the one Moonlight streams on.
+still_paired() {
+  local rc=0
+  python3 - "$HOST" "$(( $1 - 5 ))" <<'PY' 2>/dev/null || rc=$?
+
+import base64, plistlib, ssl, sys, tempfile, urllib.request, os
+# exit 0 = the host knows us, 1 = it does not, 2 = cannot tell (then the marker is trusted)
+host, port = sys.argv[1], sys.argv[2]
+p = os.path.expanduser("~/Library/Preferences/com.moonlight-stream.Moonlight.plist")
+try:
+    d = plistlib.load(open(p, "rb"))
+    cert, key = d["certificate"], d["key"]
+except Exception:
+    sys.exit(2)
+t = tempfile.mkdtemp(); cp, kp = t + "/c.pem", t + "/k.pem"
+open(cp, "wb").write(cert if isinstance(cert, bytes) else base64.b64decode(cert))
+open(kp, "wb").write(key if isinstance(key, bytes) else base64.b64decode(key))
+ctx = ssl.create_default_context(); ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+ctx.load_cert_chain(cp, kp)
+try:
+    body = urllib.request.urlopen(f"https://{host}:{port}/serverinfo?uniqueid=0123456789ABCDEF",
+                                  timeout=6, context=ctx).read().decode(errors="replace")
+except Exception:
+    sys.exit(2)          # host unreachable right now: not evidence that pairing is gone
+sys.exit(0 if "<PairStatus>1</PairStatus>" in body else 1)
+PY
+  [[ $rc -eq 1 ]] && return 1   # only a clear "not paired" answer forces pairing again
+  return 0
 }
 
 need_token() { [[ -n ${TOKEN:-} ]] || { echo "Set TOKEN in $CONF (or rerun the setup one-liner from 'omarchy-stream mac')"; exit 1; }; }
@@ -380,7 +441,7 @@ case "${1:-all}" in
     mic_sync & mic=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     mllog=$(mktemp)
-    "$MOONLIGHT" stream "$HOST" Desktop --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    stream_with_retries all "$HOST" "$mllog" --resolution "$DESKTOP_RES" --bitrate "$BITRATE" "${common[@]}"
     send_log all "$mllog"
     kill $clip ${mic:-} 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true ;;
   virtual)
@@ -400,7 +461,7 @@ case "${1:-all}" in
     mic_sync & mic=$!
     notify "$KEYS_HINT"; echo "$KEYS_HINT"
     mllog=$(mktemp)
-    "$MOONLIGHT" stream "$HOST:$VIRTUAL_PORT" Desktop --resolution "$res" --bitrate "$BITRATE" "${common[@]}" >"$mllog" 2>&1 || true
+    stream_with_retries virtual "$HOST:$VIRTUAL_PORT" "$mllog" --resolution "$res" --bitrate "$BITRATE" "${common[@]}"
     send_log virtual "$mllog"
     kill $clip ${mic:-} 2>/dev/null || true; wifi_restore; wait 2>/dev/null || true   # let the background report finish
     curl -fsS -X POST -H "Authorization: Bearer $TOKEN" "http://$HOST:$DASHBOARD_PORT/api/virtual/off" >/dev/null || true

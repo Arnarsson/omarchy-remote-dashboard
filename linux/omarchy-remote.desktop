@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=Omarchy Remote
+Comment=Stream the Omarchy PC to this laptop
+Exec=/home/sven/.local/bin/omarchy-connect-gui virtual
+Icon=video-display
+Terminal=false
+Categories=Network;RemoteAccess;
+Actions=monitor;check;
+
+[Desktop Action monitor]
+Name=Main monitor of the PC
+Exec=/home/sven/.local/bin/omarchy-connect-gui monitor
+
+[Desktop Action check]
+Name=Check connection
+Exec=/home/sven/.local/bin/omarchy-connect-gui check
